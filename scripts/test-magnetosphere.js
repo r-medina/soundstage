@@ -33,8 +33,7 @@ function makeVisualizer(seed, preset) {
   viz.params = {
     sensitivity: 1,
     loudGlow: 0.85,
-    magReflect: 0.04,
-    magReflectAuto: 0.52,
+    magReflect: 0.52,
     magVoidGlow: 0.12,
     magDensity: 0.88,
     magDensityAuto: 0.58,
@@ -68,11 +67,55 @@ function run(viz, frames) {
   }
 }
 
+function countScheduledFrames(hasFocus, displayHz, seconds) {
+  const previousDocument = global.document;
+  const previousRaf = global.requestAnimationFrame;
+  const previousCancelRaf = global.cancelAnimationFrame;
+  const callbacks = [];
+  let frames = 0;
+  const viz = Object.create(global.SCVizVisualizer.prototype);
+  viz.running = false;
+  viz.raf = 0;
+  viz.last = 0;
+  viz.nextFrameAt = 0;
+  viz.frameRateTarget = 0;
+  viz._tick = () => frames++;
+  global.document = { hasFocus: () => hasFocus };
+  global.requestAnimationFrame = (callback) => {
+    callbacks.push(callback);
+    return callbacks.length;
+  };
+  global.cancelAnimationFrame = () => {};
+  try {
+    viz.start();
+    const startedAt = viz.last;
+    const displayFrames = Math.floor(displayHz * seconds);
+    for (let frame = 1; frame <= displayFrames; frame++) {
+      const callback = callbacks.shift();
+      assert.ok(callback);
+      callback(startedAt + (frame * 1000) / displayHz);
+    }
+    viz.stop();
+  } finally {
+    if (previousDocument === undefined) delete global.document;
+    else global.document = previousDocument;
+    if (previousRaf === undefined) delete global.requestAnimationFrame;
+    else global.requestAnimationFrame = previousRaf;
+    if (previousCancelRaf === undefined) delete global.cancelAnimationFrame;
+    else global.cancelAnimationFrame = previousCancelRaf;
+  }
+  return frames;
+}
+
 const seed = 0x6d2b79f5;
+assert.equal(countScheduledFrames(true, 120, 2), 120);
+assert.equal(countScheduledFrames(false, 120, 2), 48);
 const a = makeVisualizer(seed, 0);
 const b = makeVisualizer(seed, 0);
 const voidLayer = new THREE.Layers();
 voidLayer.set(30);
+const noReflectLayer = new THREE.Layers();
+noReflectLayer.set(29);
 const post = new global.SCVizMagnetospherePost({ capabilities: { isWebGL2: true } });
 post.resize(1280, 720);
 assert.equal(post.voidMaskTarget.width, 1280);
@@ -82,6 +125,7 @@ assert.equal(post.reflectionTarget.width, 640);
 assert.equal(post.reflectionTarget.height, 360);
 assert.ok(post.compositeMaterial.uniforms.voidMaskTex);
 assert.equal(post.auraTarget.width, 214);
+assert.equal(post.auraScratch.width, 214);
 assert.ok(post.compositeMaterial.uniforms.bloomAura);
 post.releaseTargets();
 assert.equal(post.sceneTarget, null);
@@ -92,7 +136,8 @@ run(b, 1200);
 
 assert.equal(a.mag.particles.length, 1600);
 assert.equal(a.magLinePos.count, 1600 * (42 - 1) * 2);
-assert.ok(a.mag.geometryBuilds >= 850 && a.mag.geometryBuilds <= 950);
+assert.equal(a.mag.geometryBuilds, 900);
+assert.ok(Math.abs(a.mag.simulationTime - 20) < 1e-6);
 assert.ok(a.mag.particles.every((p) => Number.isFinite(p.p.x + p.p.y + p.p.z)));
 for (const orb of a.mag.orbs) {
   assert.equal(orb.mesh.children.length, 2);
@@ -100,10 +145,12 @@ for (const orb of a.mag.orbs) {
   assert.ok(orb.mesh.userData.core.material.uniforms.magReflectivity);
   assert.ok(orb.mesh.userData.core.material.uniforms.magReflectionTex);
   assert.ok(orb.mesh.userData.halo.material.uniforms.magVoidGlow);
+  assert.equal(orb.mesh.userData.halo.layers.test(noReflectLayer), true);
   assert.equal(orb.mesh.userData.core.material.toneMapped, false);
   assert.equal(orb.mesh.userData.core.material.transparent, false);
   assert.equal(orb.mesh.userData.core.layers.test(voidLayer), true);
 }
+assert.equal(a.magnetosphereRings.layers.test(noReflectLayer), true);
 assert.ok(a.mag.density >= 0.08 && a.mag.density <= 1);
 assert.ok(a.magReflectivity >= 0 && a.magReflectivity <= 1);
 
@@ -212,14 +259,13 @@ const stress = makeVisualizer(seed ^ 0x9e3779b9, 3);
 Object.assign(stress.params, {
   loudGlow: 2,
   magReflect: 1,
-  magReflectAuto: 1,
   magVoidGlow: 1,
   magDensity: 1,
   magDensityAuto: 1,
   magTrail: 2.5,
   magRibbon: 2.5,
   magAtmosphere: 2,
-  magBloom: 2,
+  magBloom: 1.1,
   magMotion: 2,
   magCoreSize: 1.6,
 });

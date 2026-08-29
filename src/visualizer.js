@@ -27,7 +27,11 @@
   const MAG_RINGS_PER_ORB = 2;
   const MAG_CORE_RADIUS = 0.64;
   const MAG_NEBULA = 720;
+  const MAG_NO_REFLECT_LAYER = 29;
   const MAG_VOID_LAYER = 30;
+  const MAG_SIM_STEP = 1 / 45;
+  const FOREGROUND_FPS = 60;
+  const BACKGROUND_FPS = 24;
 
   function magOrbShown(preset, index) {
     if (preset === 0) return index < 3;
@@ -110,6 +114,8 @@
       this.running = false;
       this.raf = 0;
       this.last = 0;
+      this.nextFrameAt = 0;
+      this.frameRateTarget = 0;
       this.elapsed = 0;
       this.artUrl = "";
       this.params = {
@@ -125,14 +131,12 @@
         bloomTight: 0,
         ridgeZoom: 2.4,
         ridgeHeight: 1.15,
-        ridgeThick: 0.55,
         ridgeFreq: 1,
         ridgeFuzz: 0.28,
         pulseArt: 1,
         sensitivity: 1,
         loudGlow: 0.85,
-        magReflect: 0.04,
-        magReflectAuto: 0.52,
+        magReflect: 0.52,
         magVoidGlow: 0.12,
         magDensity: 0.88,
         magDensityAuto: 0.58,
@@ -223,21 +227,19 @@
         bloomTight: [0, 1],
         ridgeZoom: [2.2, 3.5],
         ridgeHeight: [0.7, 4.5],
-        ridgeThick: [0.15, 2],
         ridgeFreq: [0.2, 1],
         ridgeFuzz: [0, 1],
         pulseArt: [0, 1],
         sensitivity: [0, 2.2],
         loudGlow: [0, 2],
         magReflect: [0, 1],
-        magReflectAuto: [0, 1],
         magVoidGlow: [0, 1],
         magDensity: [0.1, 1],
         magDensityAuto: [0, 1],
         magTrail: [0.2, 2.5],
         magRibbon: [0, 2.5],
         magAtmosphere: [0, 2],
-        magBloom: [0.2, 2],
+        magBloom: [0.2, 1.1],
         magMotion: [0.25, 2],
         magCoreSize: [0.6, 1.6],
       };
@@ -307,11 +309,26 @@
       if (this.running) return;
       this.running = true;
       this.last = performance.now();
+      this.nextFrameAt = this.last;
+      this.frameRateTarget = 0;
       const loop = (now) => {
         if (!this.running) return;
         try {
+          const targetFps = document.hasFocus() ? FOREGROUND_FPS : BACKGROUND_FPS;
+          if (targetFps !== this.frameRateTarget) {
+            this.frameRateTarget = targetFps;
+            this.nextFrameAt = now;
+          }
+          const interval = 1000 / targetFps;
+          if (now + 0.5 < this.nextFrameAt) {
+            this.raf = requestAnimationFrame(loop);
+            return;
+          }
           const dt = Math.min(0.05, (now - this.last) / 1000);
           this.last = now;
+          do {
+            this.nextFrameAt += interval;
+          } while (this.nextFrameAt <= now + 0.5);
           this._tick(dt);
           this.raf = requestAnimationFrame(loop);
         } catch {
@@ -406,6 +423,7 @@
         : null;
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 260);
+      this.camera.layers.enable(MAG_NO_REFLECT_LAYER);
       this.camera.layers.enable(MAG_VOID_LAYER);
       this.camera.position.set(0, 0.35, 7.2);
       this.bandData = new Uint8Array(32 * 4);
@@ -435,7 +453,6 @@
         bloomDance: { value: 0 },
         color2: { value: new THREE.Color(0.16, 0.55, 1) },
         color3: { value: new THREE.Color(1, 0.55, 0.18) },
-        ridgeThick: { value: this.params.ridgeThick },
         ridgeFreq: { value: this.params.ridgeFreq },
         ridgeFuzz: { value: this.params.ridgeFuzz },
         orbA: { value: new THREE.Vector3(1.6, 0, 0) },
@@ -648,14 +665,37 @@
       geo.setIndex(index);
       this.ridgeGeo = geo;
       this._ridgeStep = 1;
+      this.ridgeMark = new Uint8Array(RIDGE_ROWS);
+      this.ridgeMark[0] = 1;
+      this._ridgeShiftCount = 0;
+      this._syncRidgeIndex();
       this.ridgeLineMat = new THREE.LineBasicMaterial({
         vertexColors: true,
         transparent: true,
         opacity: 1,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        fog: false,
       });
       group.add(new THREE.LineSegments(geo, this.ridgeLineMat));
+      const frontPos = new Float32Array(RIDGE_COLS * 3);
+      const frontGeo = new THREE.BufferGeometry();
+      frontGeo.setAttribute("position", new THREE.BufferAttribute(frontPos, 3));
+      const frontIndex = [];
+      for (let col = 0; col < RIDGE_COLS - 1; col++) frontIndex.push(col, col + 1);
+      frontGeo.setIndex(frontIndex);
+      this.ridgeFrontGeo = frontGeo;
+      this.ridgeFrontMat = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 1,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: false,
+      });
+      this.ridgeFront = new THREE.LineSegments(frontGeo, this.ridgeFrontMat);
+      this.ridgeFront.renderOrder = 2;
+      group.add(this.ridgeFront);
       this.ridgeHalos = [];
       for (let i = 0; i < 16; i++) {
         const haloMat = this.ridgeLineMat.clone();
@@ -1040,6 +1080,7 @@
         prevKick: 0,
         preset: -1,
         trailAcc: 0,
+        simAcc: 0,
         geometryReady: false,
         geometryBuilds: 0,
         simulationTime: 0,
@@ -1148,6 +1189,7 @@
           `,
         });
         const halo = new THREE.Mesh(coreGeometry, haloMaterial);
+        halo.layers.set(MAG_NO_REFLECT_LAYER);
         halo.scale.setScalar(1.095);
         halo.renderOrder = -11;
         orb.add(halo, core);
@@ -1398,6 +1440,7 @@
         ringGeo,
         this.magnetosphereLines.material
       );
+      this.magnetosphereRings.layers.set(MAG_NO_REFLECT_LAYER);
       this.magnetosphereRings.frustumCulled = false;
 
       const flareCount = 20;
@@ -1652,26 +1695,32 @@
     }
 
     _tickRidge(dt) {
-      this._syncRidgeIndex();
       this._syncRidgeHalo();
       const pos = this.ridgeGeo.attributes.position;
       const col = this.ridgeGeo.attributes.color;
       const arr = pos.array;
       const carr = col.array;
+      const mark = this.ridgeMark;
       const [r, g, b] = this.liveAccent;
-      const loudBright = 1 + this.loudness * this.params.loudGlow * 0.72;
-      const step = this._ridgeStep || 1;
+      const fuzz = clamp(this.params.ridgeFuzz ?? 0.28, 0, 1);
+      const loudBright = 1 + this.loudness * this.params.loudGlow * 0.55;
+      const freq = this.params.ridgeFreq ?? 1;
+      const step = Math.max(1, Math.round(1 + (1 - freq) * 5));
+      this._ridgeStep = step;
       this.ridgeAcc += dt;
-      const interval = RIDGE_STEP * step;
-      while (this.ridgeAcc >= interval) {
-        this.ridgeAcc -= interval;
-        for (let row = RIDGE_ROWS - 1; row >= step; row--) {
-          if (row % step !== 0) continue;
-          const srcRow = row - step;
+      let shifted = false;
+      while (this.ridgeAcc >= RIDGE_STEP) {
+        this.ridgeAcc -= RIDGE_STEP;
+        shifted = true;
+        this._ridgeShiftCount++;
+        if (this._ridgeShiftCount % step !== 0) mark[0] = 0;
+        for (let row = RIDGE_ROWS - 1; row >= 1; row--) {
+          const dst = row * RIDGE_COLS;
+          const src = (row - 1) * RIDGE_COLS;
           for (let c = 0; c < RIDGE_COLS; c++) {
-            arr[(row * RIDGE_COLS + c) * 3 + 1] =
-              arr[(srcRow * RIDGE_COLS + c) * 3 + 1];
+            arr[(dst + c) * 3 + 1] = arr[(src + c) * 3 + 1];
           }
+          mark[row] = mark[row - 1];
         }
       }
       const sense = clamp(this.params.sensitivity ?? 1, 0, 2.2);
@@ -1682,28 +1731,47 @@
           raw * (1.75 + react * 0.3 + this.kick * 0.4 * react) * this.params.ridgeHeight;
         arr[c * 3 + 1] = hgt;
       }
-      if (step > 1) {
-        for (let row = 1; row < RIDGE_ROWS; row++) {
-          if (row % step === 0) continue;
-          for (let c = 0; c < RIDGE_COLS; c++) {
-            arr[(row * RIDGE_COLS + c) * 3 + 1] = 0;
-          }
-        }
-      }
+      mark[0] = 1;
+      if (shifted) this._syncRidgeIndex();
+      let recency = 0;
+      const fadeK = 0.5 - fuzz * 0.28;
+      const fadeFloor = 0.05 + fuzz * 0.09;
+      const whiteK = 1.2 - fuzz * 0.45;
       for (let row = 0; row < RIDGE_ROWS; row++) {
-        const t = 1 - row / RIDGE_ROWS;
-        const fade = 0.26 + 0.9 * Math.pow(t, 0.5);
-        const heat = 0.18 * t;
-        const drawn = row % step === 0;
+        const drawn = mark[row];
+        const age = drawn ? recency : 0;
+        if (drawn) recency++;
+        const white = drawn ? Math.exp(-age * whiteK) : 0;
+        const fade = drawn ? fadeFloor + 1.15 * Math.exp(-age * fadeK) : 0;
+        const tail = age === 0 ? 1 : 1 - fuzz * 0.22;
+        const shade = fade * loudBright * tail;
+        const wr = white + (r / 255) * (1 - white);
+        const wg = white + (g / 255) * (1 - white);
+        const wb = white + (b / 255) * (1 - white);
+        const hot = age === 0 ? 2.2 : 1;
         for (let c = 0; c < RIDGE_COLS; c++) {
           const i = (row * RIDGE_COLS + c) * 3;
-          carr[i] = drawn ? Math.min(1.8, ((r / 255) * fade + heat) * loudBright) : 0;
-          carr[i + 1] = drawn
-            ? Math.min(1.8, ((g / 255) * fade + heat * 0.55) * loudBright)
-            : 0;
-          carr[i + 2] = drawn
-            ? Math.min(1.8, ((b / 255) * fade + heat * 0.2) * loudBright)
-            : 0;
+          carr[i] = drawn ? wr * shade * hot : 0;
+          carr[i + 1] = drawn ? wg * shade * hot : 0;
+          carr[i + 2] = drawn ? wb * shade * hot : 0;
+        }
+      }
+      if (this.ridgeFrontGeo) {
+        const front = this.ridgeFrontGeo.attributes.position.array;
+        for (let c = 0; c < RIDGE_COLS; c++) {
+          const i = c * 3;
+          front[i] = arr[i];
+          front[i + 1] = arr[i + 1];
+          front[i + 2] = arr[i + 2];
+        }
+        this.ridgeFrontGeo.attributes.position.needsUpdate = true;
+        if (this.ridgeFrontMat) {
+          this.ridgeFrontMat.color.setRGB(
+            Math.min(1, 0.82 + (r / 255) * 0.18),
+            Math.min(1, 0.82 + (g / 255) * 0.18),
+            Math.min(1, 0.82 + (b / 255) * 0.18)
+          );
+          this.ridgeFrontMat.opacity = 0.9;
         }
       }
       pos.needsUpdate = true;
@@ -1711,13 +1779,11 @@
     }
 
     _syncRidgeIndex() {
-      if (!this.ridgeGeo) return;
-      const freq = this.params.ridgeFreq ?? 1;
-      const step = Math.max(1, Math.round(1 + (1 - freq) * 5));
-      if (this._ridgeStep === step) return;
-      this._ridgeStep = step;
+      if (!this.ridgeGeo || !this.ridgeMark) return;
+      const mark = this.ridgeMark;
       const index = [];
-      for (let row = 0; row < RIDGE_ROWS; row += step) {
+      for (let row = 0; row < RIDGE_ROWS; row++) {
+        if (!mark[row]) continue;
         for (let col = 0; col < RIDGE_COLS - 1; col++) {
           const i = row * RIDGE_COLS + col;
           index.push(i, i + 1);
@@ -1727,49 +1793,40 @@
     }
 
     _syncRidgeHalo() {
-      const thick = this.params.ridgeThick ?? 0.55;
-      const fuzz = this.params.ridgeFuzz ?? 0.28;
-      const t = clamp((thick - 0.15) / 1.85, 0, 1);
-      const f = clamp(fuzz, 0, 1);
-      if (this.ridgeLineMat) {
-        this.ridgeLineMat.opacity = 0.86 + (1 - f) * 0.14;
-      }
+      const f = clamp(this.params.ridgeFuzz ?? 0.28, 0, 1);
+      if (this.ridgeLineMat) this.ridgeLineMat.opacity = 1;
       const halos = this.ridgeHalos || [];
-      const corePairs = t < 0.03 ? 0 : Math.max(1, Math.round(1 + t * 3));
-      const glowBudget = 8 - corePairs;
-      const glowPairs = f < 0.03 ? 0 : Math.max(1, Math.round(f * glowBudget));
-      const coreHalf = 0.006 + t * 0.26;
-      const glowHalf = coreHalf + 0.02 + f * 0.3;
-      const coreCount = corePairs * 2;
-      const glowCount = glowPairs * 2;
+      const glowPairs = f < 0.03 ? 0 : Math.max(1, Math.round(1 + f * 7));
+      const glowHalf = 0.014 + f * 0.16;
+      const energy = (0.14 * f * (1 - f * 0.7)) / Math.max(glowPairs, 1);
       for (let i = 0; i < halos.length; i++) {
         const halo = halos[i];
-        const isGlow = i >= coreCount;
-        const local = isGlow ? i - coreCount : i;
-        const ring = (local >> 1) + 1;
-        const sign = local & 1 ? -1 : 1;
-        const on = isGlow ? local < glowCount : local < coreCount;
+        const ring = (i >> 1) + 1;
+        const sign = i & 1 ? -1 : 1;
+        const on = ring <= glowPairs;
         halo.visible = on;
         if (!on) {
           halo.material.opacity = 0;
           halo.position.set(0, 0, 0);
           continue;
         }
-        if (isGlow) {
-          const u = ring / glowPairs;
-          halo.position.set(0, sign * (coreHalf + u * (glowHalf - coreHalf)), 0.012 * ring);
-          halo.material.opacity = 0.18 * f * Math.exp(-u * u * 2.6);
-          halo.material.color.setRGB(0.72, 0.8, 0.96);
-        } else {
-          const u = ring / corePairs;
-          halo.position.set(0, sign * coreHalf * u, 0);
-          halo.material.opacity = (0.38 - u * 0.1) * (0.5 + t * 0.5);
-          halo.material.color.setRGB(1, 1, 1);
-        }
+        const u = ring / glowPairs;
+        halo.position.set(0, sign * glowHalf * u, 0.006 * ring);
+        halo.material.opacity = energy * Math.exp(-u * u * 2.8);
+        halo.material.color.setRGB(0.55, 0.6, 0.72);
       }
     }
 
     _tickMagnetosphere(dt) {
+      const mag = this.mag;
+      if (!mag) return;
+      mag.simAcc = Math.min(MAG_SIM_STEP * 2, mag.simAcc + Math.min(0.05, dt));
+      if (mag.simAcc + 1e-6 < MAG_SIM_STEP) return;
+      mag.simAcc -= MAG_SIM_STEP;
+      this._stepMagnetosphere(MAG_SIM_STEP);
+    }
+
+    _stepMagnetosphere(dt) {
       const mag = this.mag;
       if (!mag) return;
       const t = this.elapsed;
@@ -1786,17 +1843,7 @@
       mag.pulse +=
         (mag.pulseTarget - mag.pulse) * (1 - Math.exp(-step * pulseRate));
       mag.prevKick = this.kick;
-      const reflectionWave = Math.pow(
-        0.5 + 0.5 * Math.sin(t * 0.09 + Math.sin(t * 0.031) * 1.7),
-        1.65
-      );
-      this.magReflectivity = clamp(
-        this.params.magReflect +
-          this.params.magReflectAuto *
-            (reflectionWave * 0.72 + this.loudness * 0.34 + this.kick * 0.22),
-        0,
-        1
-      );
+      this.magReflectivity = clamp(this.params.magReflect, 0, 1);
       this.uniforms.magReflectivity.value = this.magReflectivity;
       const densityWave =
         0.5 +

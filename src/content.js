@@ -49,14 +49,12 @@
       bloomTight: 0,
       ridgeZoom: 2.4,
       ridgeHeight: 1.15,
-      ridgeThick: 0.55,
       ridgeFreq: 1,
       ridgeFuzz: 0.28,
       pulseArt: 1,
       sensitivity: 1,
       loudGlow: 0.85,
-      magReflect: 0.04,
-      magReflectAuto: 0.52,
+      magReflect: 0.52,
       magVoidGlow: 0.12,
       magDensity: 0.88,
       magDensityAuto: 0.58,
@@ -159,7 +157,17 @@
           state.waveOn = stored.waveOn !== false;
           if (stored.mode) state.mode = stored.mode;
           if (stored.params && typeof stored.params === "object") {
-            Object.assign(state.params, stored.params);
+            const params = { ...stored.params };
+            const reflectFlow = Number(params.magReflectAuto);
+            if (Number.isFinite(reflectFlow)) {
+              const reflectBase = Number(params.magReflect);
+              params.magReflect = Math.min(
+                1,
+                Math.max(0, (Number.isFinite(reflectBase) ? reflectBase : 0) + reflectFlow)
+              );
+              delete params.magReflectAuto;
+            }
+            Object.assign(state.params, params);
           }
           state.params = clampParams(state.params);
           if (state.viz) state.mode = state.viz.setMode(state.mode);
@@ -537,18 +545,16 @@
             paramSlider("bloomTight", "Tight", 0, 1, 0.01, "bloom"),
             paramSlider("ridgeZoom", "Zoom", 2.2, 3.5, 0.05, "ridge"),
             paramSlider("ridgeHeight", "Height", 0.7, 4.5, 0.05, "ridge"),
-            paramSlider("ridgeThick", "Thick", 0.15, 2, 0.05, "ridge"),
             paramSlider("ridgeFreq", "Freq", 0.2, 1, 0.01, "ridge"),
             paramSlider("ridgeFuzz", "Fuzz", 0, 1, 0.01, "ridge"),
             paramSlider("magReflect", "Reflect", 0, 1, 0.01, "magnetosphere"),
-            paramSlider("magReflectAuto", "Reflect flow", 0, 1, 0.01, "magnetosphere"),
             paramSlider("magVoidGlow", "Void halo", 0, 1, 0.01, "magnetosphere"),
             paramSlider("magDensity", "Density", 0.1, 1, 0.01, "magnetosphere"),
             paramSlider("magDensityAuto", "Density flow", 0, 1, 0.01, "magnetosphere"),
             paramSlider("magTrail", "Trails", 0.2, 2.5, 0.05, "magnetosphere"),
             paramSlider("magRibbon", "Ribbons", 0, 2.5, 0.05, "magnetosphere"),
             paramSlider("magAtmosphere", "Atmosphere", 0, 2, 0.05, "magnetosphere"),
-            paramSlider("magBloom", "Bloom", 0.2, 2, 0.05, "magnetosphere"),
+            paramSlider("magBloom", "Bloom", 0.2, 1.1, 0.05, "magnetosphere"),
             paramSlider("magMotion", "Motion", 0.25, 2, 0.05, "magnetosphere"),
             paramSlider("magCoreSize", "Core size", 0.6, 1.6, 0.05, "magnetosphere"),
           ]),
@@ -750,21 +756,19 @@
     bloomTight: [0, 1, 0],
     ridgeZoom: [2.2, 3.5, 2.4],
     ridgeHeight: [0.7, 4.5, 1.15],
-    ridgeThick: [0.15, 2, 0.55],
     ridgeFreq: [0.2, 1, 1],
     ridgeFuzz: [0, 1, 0.28],
     pulseArt: [0, 1, 1],
     sensitivity: [0, 2.2, 1],
     loudGlow: [0, 2, 0.85],
-    magReflect: [0, 1, 0.04],
-    magReflectAuto: [0, 1, 0.52],
+    magReflect: [0, 1, 0.52],
     magVoidGlow: [0, 1, 0.12],
     magDensity: [0.1, 1, 0.88],
     magDensityAuto: [0, 1, 0.58],
     magTrail: [0.2, 2.5, 1],
     magRibbon: [0, 2.5, 1],
     magAtmosphere: [0, 2, 1],
-    magBloom: [0.2, 2, 1],
+    magBloom: [0.2, 1.1, 1],
     magMotion: [0.25, 2, 1],
     magCoreSize: [0.6, 1.6, 1],
   };
@@ -869,6 +873,11 @@
     waveBtn?.classList.toggle("is-on", state.waveOn);
     if (waveBtn) {
       setChip(waveBtn, waveIcon(), state.waveOn ? "Waveform" : "Waveform off");
+    }
+    if (state.on && state.waveOn) {
+      requestAnimationFrame(() => {
+        if (state.on && state.waveOn) state.viz?.resize();
+      });
     }
     wakeChrome();
   }

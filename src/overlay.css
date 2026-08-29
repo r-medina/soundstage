@@ -541,18 +541,30 @@ html.scviz-on:not(.scviz-wave-off) .scviz-meta {
 .scviz-tray-toggle {
   flex-direction: row;
   align-items: center;
+  align-self: start;
   gap: 8px;
+  min-height: 18px;
 }
 
 .scviz-tray-toggle span {
   flex: 1;
+  line-height: 18px;
+}
+
+.scviz-tray-toggle .scviz-tray-val {
+  line-height: 18px;
 }
 
 .scviz-tray-item input[type="checkbox"] {
   appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  box-sizing: border-box;
   width: 34px;
   height: 18px;
   margin: 0;
+  padding: 0;
+  border: 0;
   flex: none;
   position: relative;
   border-radius: 999px;
@@ -564,13 +576,14 @@ html.scviz-on:not(.scviz-wave-off) .scviz-meta {
 .scviz-tray-item input[type="checkbox"]::after {
   content: "";
   position: absolute;
-  top: 2px;
+  top: 50%;
   left: 2px;
   width: 14px;
   height: 14px;
   border-radius: 50%;
   background: #fff;
-  transition: transform 0.15s ease;
+  transform: translateY(-50%);
+  transition: left 0.15s ease;
 }
 
 .scviz-tray-item input[type="checkbox"]:checked {
@@ -578,7 +591,7 @@ html.scviz-on:not(.scviz-wave-off) .scviz-meta {
 }
 
 .scviz-tray-item input[type="checkbox"]:checked::after {
-  transform: translateX(16px);
+  left: 18px;
 }
 
 .scviz-tray-item input[type="range"] {
@@ -681,7 +694,8 @@ html.scviz-on:not(.scviz-wave-off) .scviz-toasts {
 }
 
 html.scviz-wave-off .scviz-wave {
-  display: none;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 #scviz-wave-canvas {

@@ -93,48 +93,6 @@
         `,
       });
 
-      this.auraMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          inputTex: { value: null },
-          texelSize: { value: new THREE.Vector2(1, 1) },
-          radius: { value: 4.4 },
-        },
-        depthTest: false,
-        depthWrite: false,
-        vertexShader: FULLSCREEN_VERTEX,
-        fragmentShader: `
-          uniform sampler2D inputTex;
-          uniform vec2 texelSize;
-          uniform float radius;
-          varying vec2 vUv;
-          void main() {
-            vec2 px = texelSize * radius;
-            vec2 d1 = px * 1.4;
-            vec2 q1 = px * 1.15;
-            vec2 d2 = px * 3.6;
-            vec2 q2 = px * 3.0;
-            vec3 color = texture2D(inputTex, vUv).rgb * 0.16;
-            color += texture2D(inputTex, vUv + vec2(d1.x, 0.0)).rgb * 0.085;
-            color += texture2D(inputTex, vUv - vec2(d1.x, 0.0)).rgb * 0.085;
-            color += texture2D(inputTex, vUv + vec2(0.0, d1.y)).rgb * 0.085;
-            color += texture2D(inputTex, vUv - vec2(0.0, d1.y)).rgb * 0.085;
-            color += texture2D(inputTex, vUv + q1).rgb * 0.065;
-            color += texture2D(inputTex, vUv - q1).rgb * 0.065;
-            color += texture2D(inputTex, vUv + vec2(q1.x, -q1.y)).rgb * 0.065;
-            color += texture2D(inputTex, vUv + vec2(-q1.x, q1.y)).rgb * 0.065;
-            color += texture2D(inputTex, vUv + vec2(d2.x, 0.0)).rgb * 0.04;
-            color += texture2D(inputTex, vUv - vec2(d2.x, 0.0)).rgb * 0.04;
-            color += texture2D(inputTex, vUv + vec2(0.0, d2.y)).rgb * 0.04;
-            color += texture2D(inputTex, vUv - vec2(0.0, d2.y)).rgb * 0.04;
-            color += texture2D(inputTex, vUv + q2).rgb * 0.02;
-            color += texture2D(inputTex, vUv - q2).rgb * 0.02;
-            color += texture2D(inputTex, vUv + vec2(q2.x, -q2.y)).rgb * 0.02;
-            color += texture2D(inputTex, vUv + vec2(-q2.x, q2.y)).rgb * 0.02;
-            gl_FragColor = vec4(color, 1.0);
-          }
-        `,
-      });
-
       this.compositeMaterial = new THREE.ShaderMaterial({
         uniforms: {
           sceneTex: { value: null },
@@ -248,6 +206,7 @@
       this.quarterA = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
       this.quarterB = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
       this.auraTarget = this._target(Math.ceil(width / 6), Math.ceil(height / 6));
+      this.auraScratch = this._target(Math.ceil(width / 6), Math.ceil(height / 6));
     }
 
     _draw(material, target) {
@@ -271,11 +230,11 @@
     }
 
     _aura(input, output, radius) {
-      const uniforms = this.auraMaterial.uniforms;
-      uniforms.inputTex.value = input.texture;
-      uniforms.texelSize.value.set(1 / input.width, 1 / input.height);
-      uniforms.radius.value = radius;
-      this._draw(this.auraMaterial, output);
+      this.copyMaterial.uniforms.inputTex.value = input.texture;
+      this._draw(this.copyMaterial, output);
+      const passRadius = radius * 0.72;
+      this._blur(output, this.auraScratch, output, passRadius);
+      this._blur(output, this.auraScratch, output, passRadius);
     }
 
     render(scene, camera, options = {}) {
@@ -369,6 +328,7 @@
         "quarterA",
         "quarterB",
         "auraTarget",
+        "auraScratch",
       ]) {
         this[name]?.dispose();
         this[name] = null;
@@ -381,7 +341,6 @@
       this.brightMaterial.dispose();
       this.copyMaterial.dispose();
       this.blurMaterial.dispose();
-      this.auraMaterial.dispose();
       this.compositeMaterial.dispose();
       this.voidMaskMaterial.dispose();
     }
