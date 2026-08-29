@@ -8,8 +8,8 @@ There are four WebGL visualizers:
 
 - **Pulse** — a glowing wireframe orb that distorts with the music (Three.js / Codrops-style)
 - **Ridge** — receding Joy Division–style spectrum mountains
-- **Bloom** — a particle nebula that breathes with bass
-- **Magnetosphere** — a cinematic recreation of Robert Hodgin's classic iTunes visualizer: 1,600 charged particles, long-lived hair and ribbon trails, light-absorbing black voids, volumetric atmosphere, star flares, and multi-scale HDR bloom
+- **Bloom** — a particle nebula that breathes with bass while its ring plane banks and the camera orbits, rises, and dives through the field
+- **Magnetosphere** — a cinematic recreation of Robert Hodgin's classic iTunes visualizer: 1,600 charged particles, long-lived hair and ribbon trails, light-absorbing black voids, live streak reflections, volumetric atmosphere, star flares, and three-scale HDR bloom
 
 Cycle them from the HUD or with **V**. Comments can be shown or hidden — timed comments appear on the waveform, as bubbles, and in a list on the right.
 
@@ -32,6 +32,10 @@ Chrome may warn that the extension can capture tab audio. That’s only used to 
 
 Comments show as avatars on the waveform, timed bubbles as the playhead hits them, and a list on the right.
 
+The knobs tray includes a global loudness-glow response plus mode-specific controls. Magnetosphere exposes reflectivity and automatic reflection flow, a subtle void halo, particle density and density flow, trail/ribbon intensity, atmosphere, bloom, motion, and core size. Its voids remain black at zero reflectivity, while the optional halo just reveals their silhouette; when reflectivity rises, they mirror the live streak field rather than a fixed highlight. Ridge height ranges up to 4.5.
+
+Magnetosphere keeps its cinematic three-scale bloom and full-resolution void edges, but avoids multisampled HDR buffers, releases its render targets when inactive, reuses audio buffers, and adaptively lowers internal resolution only after sustained slow frames. The local lab reports frame time, quality scale, render resolution, and draw calls.
+
 ## Files
 
 ```
@@ -48,4 +52,4 @@ scripts/test-magnetosphere.js # long-run simulation and preset checks
 icons/
 ```
 
-Open `preview.html` directly to tune or inspect Magnetosphere without SoundCloud. The lab provides deterministic seeds, fixed scene presets, synthetic audio fixtures, camera/freeze controls, and PNG capture.
+Open `preview.html` directly to tune or inspect the visualizers without SoundCloud. Click **Load song**—the modern Chrome picker starts in Downloads—or drag an MP3 onto the page. The lab uses a real Web Audio analyser and also provides synthetic fixtures, deterministic seeds, visualizer switching, PNG capture, and every tuning control from the extension. It shows only global controls plus those belonging to the active visualizer; Magnetosphere additionally exposes its presets, seed, camera lock, and freeze controls.

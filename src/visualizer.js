@@ -85,6 +85,10 @@
       this.progress = 0;
       this.accent = [255, 85, 0];
       this.energy = 0;
+      this.integratedPower = 0;
+      this.loudness = 0;
+      this.powerFast = 0;
+      this.powerSlow = 0;
       this.bass = 0;
       this.mid = 0;
       this.high = 0;
@@ -116,6 +120,18 @@
         ridgeFreq: 1,
         ridgeFuzz: 0.28,
         sensitivity: 1,
+        loudGlow: 0.85,
+        magReflect: 0.04,
+        magReflectAuto: 0.52,
+        magVoidGlow: 0.12,
+        magDensity: 0.88,
+        magDensityAuto: 0.58,
+        magTrail: 1,
+        magRibbon: 1,
+        magAtmosphere: 1,
+        magBloom: 1,
+        magMotion: 1,
+        magCoreSize: 1,
       };
       this.liveAccent = [255, 85, 0];
       this.liveAccent2 = [40, 140, 255];
@@ -124,6 +140,11 @@
       this._camBase = null;
       this.ridgeAcc = 0;
       this.magnetosphereMid = null;
+      this.magQualityScale = 1;
+      this.frameMsSmooth = 16.7;
+      this._slowRenderSeconds = 0;
+      this._fastRenderSeconds = 0;
+      this.qualityChanges = 0;
       this.magSeed = (Number(options.magSeed ?? 0x6d2b79f5) >>> 0) || 0x6d2b79f5;
       this.magOptions = {
         forcedPreset: Number.isFinite(options.magPreset) ? options.magPreset | 0 : null,
@@ -138,6 +159,7 @@
     }
 
     setMode(id) {
+      const previous = this.mode;
       const resolved = LEGACY[id] || id;
       this.mode = MODES.some((m) => m.id === resolved) ? resolved : "pulse";
       if (this.pulse) {
@@ -148,6 +170,16 @@
       }
       if (this.scene) {
         this.scene.fog = this.mode === "ridge" ? this.ridgeFog : null;
+      }
+      if (this.renderer && previous !== this.mode) {
+        if (this.mode === "magnetosphere") {
+          this._slowRenderSeconds = 0;
+          this._fastRenderSeconds = 0;
+          this.resize();
+        } else {
+          if (previous === "magnetosphere") this.magPost?.releaseTargets();
+          this.resize();
+        }
       }
       return this.mode;
     }
@@ -178,11 +210,23 @@
         bloomSoft: [0, 1],
         bloomTight: [0, 1],
         ridgeZoom: [2.2, 3.5],
-        ridgeHeight: [0.7, 2],
+        ridgeHeight: [0.7, 4.5],
         ridgeThick: [0.15, 2],
         ridgeFreq: [0.2, 1],
         ridgeFuzz: [0, 1],
         sensitivity: [0, 2.2],
+        loudGlow: [0, 2],
+        magReflect: [0, 1],
+        magReflectAuto: [0, 1],
+        magVoidGlow: [0, 1],
+        magDensity: [0.1, 1],
+        magDensityAuto: [0, 1],
+        magTrail: [0.2, 2.5],
+        magRibbon: [0, 2.5],
+        magAtmosphere: [0, 2],
+        magBloom: [0.2, 2],
+        magMotion: [0.25, 2],
+        magCoreSize: [0.6, 1.6],
       };
       for (const [key, range] of Object.entries(limits)) {
         this.params[key] = clamp(this.params[key], range[0], range[1]);
@@ -199,10 +243,14 @@
 
     setAudio(freq, time) {
       if (freq?.length) {
-        this.freq = Uint8Array.from(freq);
+        if (this.freq.length !== freq.length) this.freq = new Uint8Array(freq.length);
+        this.freq.set(freq);
         this.hasAudio = true;
       }
-      if (time?.length) this.time = Uint8Array.from(time);
+      if (time?.length) {
+        if (this.time?.length !== time.length) this.time = new Uint8Array(time.length);
+        this.time.set(time);
+      }
     }
 
     setWaveform(samples) {
@@ -265,13 +313,16 @@
 
     resize() {
       const rect = this.canvas.getBoundingClientRect();
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const deviceDpr = window.devicePixelRatio || 1;
+      const dprCap = this.mode === "magnetosphere" ? 1.35 : 1.75;
+      const quality = this.mode === "magnetosphere" ? this.magQualityScale : 1;
+      const dpr = Math.max(0.75, Math.min(dprCap, deviceDpr) * quality);
       if (this.renderer) {
         this.renderer.setPixelRatio(dpr);
         this.renderer.setSize(Math.max(1, rect.width), Math.max(1, rect.height), false);
         this.camera.aspect = rect.width / Math.max(1, rect.height);
         this.camera.updateProjectionMatrix();
-        if (this.magPost) {
+        if (this.magPost && this.mode === "magnetosphere") {
           this._postSize ||= new THREE.Vector2();
           this.renderer.getDrawingBufferSize(this._postSize);
           this.magPost.resize(this._postSize.x, this._postSize.y);
@@ -282,6 +333,42 @@
         this._fitRidgeToView((zoom - 2.2) / 1.3);
       }
       fitCanvas(this.waveCanvas, this.waveCtx);
+    }
+
+    _updatePerformance(dt) {
+      if (!Number.isFinite(dt) || dt <= 0 || (typeof document !== "undefined" && document.hidden)) {
+        return;
+      }
+      const frameMs = dt * 1000;
+      this.frameMsSmooth += (frameMs - this.frameMsSmooth) * 0.06;
+      if (this.mode !== "magnetosphere") {
+        this._slowRenderSeconds = 0;
+        this._fastRenderSeconds = 0;
+        return;
+      }
+      if (this.frameMsSmooth > 23.5) {
+        this._slowRenderSeconds += dt;
+        this._fastRenderSeconds = 0;
+      } else if (this.frameMsSmooth < 17.2) {
+        this._fastRenderSeconds += dt;
+        this._slowRenderSeconds = Math.max(0, this._slowRenderSeconds - dt * 0.5);
+      } else {
+        this._slowRenderSeconds = Math.max(0, this._slowRenderSeconds - dt * 0.25);
+        this._fastRenderSeconds = 0;
+      }
+      if (this._slowRenderSeconds > 1.8 && this.magQualityScale > 0.62) {
+        this.magQualityScale = Math.max(0.62, this.magQualityScale - 0.12);
+        this._slowRenderSeconds = 0;
+        this._fastRenderSeconds = 0;
+        this.qualityChanges++;
+        this.resize();
+      } else if (this._fastRenderSeconds > 8 && this.magQualityScale < 1) {
+        this.magQualityScale = Math.min(1, this.magQualityScale + 0.08);
+        this._slowRenderSeconds = 0;
+        this._fastRenderSeconds = 0;
+        this.qualityChanges++;
+        this.resize();
+      }
     }
 
     _initThree() {
@@ -298,11 +385,13 @@
       });
       this.renderer.setClearColor(0x000000, 0);
       this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+      this.renderer.info.autoReset = false;
       this.magPost = typeof SCVizMagnetospherePost !== "undefined"
         ? new SCVizMagnetospherePost(this.renderer)
         : null;
       this.scene = new THREE.Scene();
       this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 260);
+      this.camera.layers.enable(MAG_VOID_LAYER);
       this.camera.position.set(0, 0.35, 7.2);
       this.bandData = new Uint8Array(32 * 4);
       this.bandTex = new THREE.DataTexture(this.bandData, 32, 1, THREE.RGBAFormat);
@@ -313,6 +402,8 @@
       this.uniforms = {
         time: { value: 0 },
         audioLevel: { value: 0 },
+        loudness: { value: 0 },
+        loudGlow: { value: this.params.loudGlow },
         bass: { value: 0 },
         color: { value: new THREE.Color(1, 0.33, 0) },
         bands: { value: this.bandTex },
@@ -334,6 +425,11 @@
         orbA: { value: new THREE.Vector3(1.6, 0, 0) },
         orbB: { value: new THREE.Vector3(-1.6, 0, 0) },
         couple: { value: 0.5 },
+        magReflectivity: { value: 0 },
+        magReflectionTex: { value: null },
+        magVoidGlow: { value: this.params.magVoidGlow },
+        magTrail: { value: this.params.magTrail },
+        magAtmosphere: { value: this.params.magAtmosphere },
       };
       this.ridgeFog = new THREE.FogExp2(0x08141e, 0.015);
       this.pulse = this._makePulse();
@@ -351,7 +447,8 @@
         uniforms: this.uniforms,
         wireframe: true,
         transparent: true,
-        depthWrite: false,
+        depthWrite: true,
+        side: THREE.DoubleSide,
         vertexShader: `
           uniform float time;
           uniform float audioLevel;
@@ -374,6 +471,8 @@
           uniform vec3 color;
           uniform float audioLevel;
           uniform float time;
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec3 vNormal;
           varying vec3 vWorldPos;
           void main() {
@@ -383,12 +482,14 @@
             float pulse = 0.75 + 0.25 * sin(time * 2.0);
             vec3 col = color * fresnel * pulse * (1.15 + audioLevel * 1.1);
             col += vec3(1.0) * fresnel * fresnel * 0.35;
+            col *= 1.0 + loudness * loudGlow * 0.82;
             float alpha = fresnel * (0.55 + audioLevel * 0.35);
             gl_FragColor = vec4(col, alpha);
           }
         `,
       });
       const outer = new THREE.Mesh(new THREE.IcosahedronGeometry(1.55, 4), outerMat);
+      outer.renderOrder = 0;
       const glowMat = new THREE.ShaderMaterial({
         uniforms: this.uniforms,
         side: THREE.BackSide,
@@ -408,13 +509,18 @@
         fragmentShader: `
           uniform vec3 color;
           uniform float audioLevel;
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec3 vNormal;
           varying vec3 vWorldPos;
           void main() {
             vec3 viewDir = normalize(cameraPosition - vWorldPos);
             float fresnel = pow(1.0 - max(0.0, dot(viewDir, normalize(vNormal))), 3.0);
             float a = fresnel * (0.22 + audioLevel * 0.45);
-            gl_FragColor = vec4(color * (1.2 + audioLevel), a);
+            gl_FragColor = vec4(
+              color * (1.2 + audioLevel) * (1.0 + loudness * loudGlow * 0.72),
+              a
+            );
           }
         `,
       });
@@ -423,9 +529,12 @@
         color: 0xffffff,
         transparent: true,
         opacity: 0.52,
+        depthTest: true,
         depthWrite: false,
+        side: THREE.DoubleSide,
       });
       this.artMesh = new THREE.Mesh(new THREE.CircleGeometry(0.82, 48), this.artMat);
+      this.artMesh.renderOrder = 1;
       const count = 2200;
       const pPos = new Float32Array(count * 3);
       const pSize = new Float32Array(count);
@@ -476,6 +585,8 @@
         `,
         fragmentShader: `
           uniform vec3 color;
+          uniform float loudness;
+          uniform float loudGlow;
           varying float vGain;
           varying float vSeed;
           void main() {
@@ -483,7 +594,8 @@
             if (max(abs(p.x), abs(p.y)) > 0.48) discard;
             float edge = 1.0 - smoothstep(0.38, 0.48, max(abs(p.x), abs(p.y)));
             float lit = 0.12 + vSeed * 0.08 + vGain * vGain * 1.35;
-            gl_FragColor = vec4(color * (0.55 + vGain * 1.6), edge * lit);
+            float bright = 1.0 + loudness * loudGlow * 0.68;
+            gl_FragColor = vec4(color * (0.55 + vGain * 1.6) * bright, edge * lit);
           }
         `,
       });
@@ -565,6 +677,8 @@
           uniform vec3 color;
           uniform float time;
           uniform float audioLevel;
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec2 vUv;
           varying vec3 vPos;
           void main() {
@@ -580,6 +694,7 @@
             float wash = 0.07 + depth * 0.16 + audioLevel * 0.04;
             float horizon = pow(smoothstep(0.62, 1.0, depth), 1.4);
             vec3 col = cool * wash + color * grid * 0.22 + color * horizon * 0.18;
+            col *= 1.0 + loudness * loudGlow * 0.34;
             float alpha = 0.22 + grid * 0.28 + horizon * 0.2;
             gl_FragColor = vec4(col, alpha);
           }
@@ -608,6 +723,8 @@
           uniform vec3 color;
           uniform float time;
           uniform float audioLevel;
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec2 vUv;
           void main() {
             float h = vUv.y;
@@ -616,6 +733,7 @@
             float horz = pow(smoothstep(0.08, 0.42, h) * (1.0 - smoothstep(0.42, 0.78, h)), 1.1);
             vec3 col = mix(zenith, belt, horz);
             col += color * audioLevel * 0.04 * horz;
+            col *= 1.0 + loudness * loudGlow * 0.28;
             float alpha = 0.42 + horz * 0.28;
             gl_FragColor = vec4(col, alpha);
           }
@@ -644,13 +762,19 @@
         fragmentShader: `
           uniform vec3 color;
           uniform float audioLevel;
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec2 vUv;
           void main() {
             float gx = 1.0 - pow(abs(vUv.x - 0.5) * 2.0, 1.6);
             float gy = exp(-pow((vUv.y - 0.5) * 7.5, 2.0));
             float glow = gx * gy;
             vec3 col = mix(color, vec3(0.75, 0.88, 1.0), 0.35);
-            gl_FragColor = vec4(col * (0.7 + audioLevel * 0.45), glow * (0.28 + audioLevel * 0.18));
+            float bright = 1.0 + loudness * loudGlow * 0.7;
+            gl_FragColor = vec4(
+              col * (0.7 + audioLevel * 0.45) * bright,
+              glow * (0.28 + audioLevel * 0.18)
+            );
           }
         `,
       });
@@ -711,6 +835,8 @@
         fragmentShader: `
           uniform vec3 color;
           uniform float time;
+          uniform float loudness;
+          uniform float loudGlow;
           varying float vAlpha;
           varying float vSeed;
           varying float vFar;
@@ -721,7 +847,8 @@
             float glow = pow(1.0 - d * 2.0, mix(1.35, 2.1, vFar));
             float twinkle = 0.75 + 0.25 * sin(time * (0.7 + vSeed * 1.8) + vSeed * 12.0);
             vec3 tint = mix(color, vec3(0.72, 0.86, 1.0), 0.25 + vFar * 0.4);
-            gl_FragColor = vec4(tint * twinkle, glow * vAlpha * twinkle);
+            float bright = 1.0 + loudness * loudGlow * 0.62;
+            gl_FragColor = vec4(tint * twinkle * bright, glow * vAlpha * twinkle);
           }
         `,
       });
@@ -815,6 +942,8 @@
           uniform float bloomSoft;
           uniform float bloomReact;
           uniform float time;
+          uniform float loudness;
+          uniform float loudGlow;
           varying float vAlpha;
           varying float vGain;
           varying float vLive;
@@ -836,7 +965,9 @@
             vec3 hot = mix(themed, vec3(1.0, 0.94, 0.8), bloomWarm * (0.12 + vLive * 0.22 + vBand * 0.12));
             float twinkle = 0.72 + 0.28 * sin(time * (1.4 + vSeed * 3.2) + vSeed * 18.0);
             float spark = mix(1.0, twinkle, bloomSpark * (0.38 + vLive * 0.35));
-            float bright = bloomBright * (1.08 + vLive * 0.28) * spark;
+            float bright =
+              bloomBright * (1.08 + vLive * 0.28) * spark *
+              (1.0 + loudness * loudGlow * 0.92);
             gl_FragColor = vec4(hot * bright * glow, glow * vAlpha);
           }
         `,
@@ -882,26 +1013,119 @@
         prevKick: 0,
         preset: -1,
         trailAcc: 0,
+        geometryReady: false,
+        geometryBuilds: 0,
         simulationTime: 0,
         cameraLocked: false,
+        density: 1,
       };
+      const coreGeometry = new THREE.SphereGeometry(0.64, 48, 36);
       const makeOrb = (index) => {
         const orb = new THREE.Group();
-        const coreMaterial = new THREE.MeshBasicMaterial({
-          color: 0x000000,
+        const coreMaterial = new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
           depthTest: true,
           depthWrite: true,
-          fog: false,
           toneMapped: false,
+          vertexShader: `
+            varying vec3 vNormal;
+            varying vec3 vWorldPos;
+            varying vec4 vClipPos;
+            void main() {
+              vNormal = normalize(mat3(modelMatrix) * normal);
+              vec4 world = modelMatrix * vec4(position, 1.0);
+              vWorldPos = world.xyz;
+              vClipPos = projectionMatrix * viewMatrix * world;
+              gl_Position = vClipPos;
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 color;
+            uniform vec3 color2;
+            uniform vec3 color3;
+            uniform float time;
+            uniform float loudness;
+            uniform float loudGlow;
+            uniform float magReflectivity;
+            uniform sampler2D magReflectionTex;
+            varying vec3 vNormal;
+            varying vec3 vWorldPos;
+            varying vec4 vClipPos;
+            void main() {
+              vec3 n = normalize(vNormal);
+              vec3 viewDir = normalize(cameraPosition - vWorldPos);
+              vec3 reflected = reflect(-viewDir, n);
+              float fresnel = pow(1.0 - max(0.0, dot(n, viewDir)), 2.2);
+              vec2 screenUv = vClipPos.xy / max(vClipPos.w, 0.0001) * 0.5 + 0.5;
+              vec2 warp = (n.xy * 0.075 + reflected.xy * 0.035) * (0.45 + fresnel);
+              vec3 liveReflection = texture2D(
+                magReflectionTex,
+                clamp(screenUv + warp, vec2(0.002), vec2(0.998))
+              ).rgb;
+              float sweep = 0.5 + 0.5 * sin(
+                reflected.y * 7.5 + reflected.x * 3.2 + reflected.z * 1.7 + time * 0.11
+              );
+              float environment = pow(smoothstep(0.48, 0.94, sweep), 3.5);
+              float polar = pow(max(0.0, reflected.y * 0.62 + 0.38), 6.0);
+              vec3 lightDir = normalize(vec3(-0.38, 0.76, 0.53));
+              vec3 halfDir = normalize(lightDir + viewDir);
+              float specular = pow(max(0.0, dot(n, halfDir)), 104.0);
+              vec3 tint = mix(color2, color3, 0.5 + 0.5 * reflected.x);
+              tint = mix(tint, color, polar * 0.55);
+              vec3 reflection = liveReflection * (0.72 + fresnel * 1.15);
+              reflection += tint * environment * 0.055;
+              reflection += mix(tint, vec3(0.92, 0.97, 1.0), 0.72) * polar * 0.07;
+              reflection += vec3(1.0, 0.97, 0.9) * specular * 0.7;
+              float loud = 1.0 + loudness * loudGlow * 0.72;
+              gl_FragColor = vec4(reflection * magReflectivity * loud, 1.0);
+            }
+          `,
         });
-        const core = new THREE.Mesh(
-          new THREE.SphereGeometry(0.64, 48, 36),
-          coreMaterial
-        );
-        core.layers.enable(MAG_VOID_LAYER);
+        const core = new THREE.Mesh(coreGeometry, coreMaterial);
+        core.layers.set(MAG_VOID_LAYER);
         core.renderOrder = -10;
-        orb.add(core);
+        const haloMaterial = new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
+          side: THREE.BackSide,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+          vertexShader: `
+            varying vec3 vNormal;
+            varying vec3 vWorldPos;
+            void main() {
+              vNormal = normalize(mat3(modelMatrix) * normal);
+              vec4 world = modelMatrix * vec4(position, 1.0);
+              vWorldPos = world.xyz;
+              gl_Position = projectionMatrix * viewMatrix * world;
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 color2;
+            uniform vec3 color3;
+            uniform float time;
+            uniform float loudness;
+            uniform float loudGlow;
+            uniform float magVoidGlow;
+            varying vec3 vNormal;
+            varying vec3 vWorldPos;
+            void main() {
+              vec3 viewDir = normalize(cameraPosition - vWorldPos);
+              float rim = pow(1.0 - abs(dot(normalize(vNormal), viewDir)), 2.8);
+              float drift = 0.82 + 0.18 * sin(time * 0.17 + vWorldPos.y * 2.4);
+              float strength = magVoidGlow * rim * drift * (1.0 + loudness * loudGlow * 0.28);
+              vec3 tint = mix(color2, color3, 0.42 + 0.16 * sin(time * 0.07));
+              gl_FragColor = vec4(tint * 0.34, strength * 0.28);
+            }
+          `,
+        });
+        const halo = new THREE.Mesh(coreGeometry, haloMaterial);
+        halo.scale.setScalar(1.095);
+        halo.renderOrder = -11;
+        orb.add(halo, core);
         orb.userData.core = core;
+        orb.userData.halo = halo;
         orb.userData.coreMaterial = coreMaterial;
         orb.userData.index = index;
         return orb;
@@ -959,6 +1183,7 @@
       this.magnetosphereLines = new THREE.LineSegments(
         lineGeo,
         new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
           transparent: true,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
@@ -974,10 +1199,14 @@
             }
           `,
           fragmentShader: `
+            uniform float loudness;
+            uniform float loudGlow;
+            uniform float magTrail;
             varying vec3 vColor;
             varying float vAlpha;
             void main() {
-              gl_FragColor = vec4(vColor * (0.8 + vAlpha * 0.75), vAlpha);
+              float bright = magTrail * (1.0 + loudness * loudGlow * 0.82);
+              gl_FragColor = vec4(vColor * (0.8 + vAlpha * 0.75) * bright, vAlpha * magTrail);
             }
           `,
         })
@@ -1017,6 +1246,8 @@
           }
         `,
         fragmentShader: `
+          uniform float loudness;
+          uniform float loudGlow;
           varying vec3 vColor;
           varying float vLife;
           void main() {
@@ -1031,7 +1262,8 @@
             float star = (rayX + rayY) * 0.18;
             float a = (halo * 0.28 + glow * 0.62 + core + star) * vLife;
             vec3 hot = mix(vColor, vec3(1.0, 0.97, 0.9), core * 0.82 + star * 0.3);
-            gl_FragColor = vec4(hot * (0.72 + glow * 0.8 + core * 2.6 + star), a);
+            float bright = 1.0 + loudness * loudGlow;
+            gl_FragColor = vec4(hot * (0.72 + glow * 0.8 + core * 2.6 + star) * bright, a);
           }
         `,
       });
@@ -1061,6 +1293,7 @@
       this.magnetosphereRibbons = new THREE.Mesh(
         ribbonGeo,
         new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
           transparent: true,
           blending: THREE.AdditiveBlending,
           depthWrite: false,
@@ -1078,11 +1311,14 @@
             }
           `,
           fragmentShader: `
+            uniform float loudness;
+            uniform float loudGlow;
             varying vec3 vColor;
             varying float vAlpha;
             void main() {
               float edge = 0.7 + vAlpha * 0.6;
-              gl_FragColor = vec4(vColor * edge, vAlpha);
+              float bright = 1.0 + loudness * loudGlow * 0.7;
+              gl_FragColor = vec4(vColor * edge * bright, vAlpha);
             }
           `,
         })
@@ -1107,7 +1343,7 @@
       this.magSpikeAlpha = spikeGeo.attributes.alpha;
       this.magnetosphereSpikes = new THREE.LineSegments(
         spikeGeo,
-        this.magnetosphereLines.material.clone()
+        this.magnetosphereLines.material
       );
       this.magnetosphereSpikes.frustumCulled = false;
 
@@ -1130,7 +1366,7 @@
       this.magRingAlpha = ringGeo.attributes.alpha;
       this.magnetosphereRings = new THREE.LineSegments(
         ringGeo,
-        this.magnetosphereLines.material.clone()
+        this.magnetosphereLines.material
       );
       this.magnetosphereRings.frustumCulled = false;
 
@@ -1213,6 +1449,9 @@
           uniform vec3 color;
           uniform vec3 color2;
           uniform float time;
+          uniform float loudness;
+          uniform float loudGlow;
+          uniform float magAtmosphere;
           varying float vAlpha;
           varying float vSeed;
           void main() {
@@ -1221,7 +1460,8 @@
             if (d > 0.5) discard;
             float glow = pow(1.0 - d * 2.0, 1.85);
             vec3 tint = mix(color, color2, 0.42 + 0.34 * sin(time * 0.035 + vSeed * 5.0));
-            gl_FragColor = vec4(tint * 0.52, glow * vAlpha);
+            float bright = magAtmosphere * (1.0 + loudness * loudGlow * 0.42);
+            gl_FragColor = vec4(tint * 0.52 * bright, glow * vAlpha * magAtmosphere);
           }
         `,
       });
@@ -1249,6 +1489,9 @@
             uniform vec3 color3;
             uniform float time;
             uniform float audioLevel;
+            uniform float loudness;
+            uniform float loudGlow;
+            uniform float magAtmosphere;
             varying vec3 vWorldPos;
             ${SNOISE}
             void main() {
@@ -1258,19 +1501,20 @@
               float colorNoise = 0.0;
               for (int i = 0; i < 5; i++) {
                 float fi = float(i);
-                vec3 samplePos = cameraPosition * 0.14 + ray * (2.0 + fi * 2.1) + drift;
+                vec3 samplePos = cameraPosition * 0.14 + ray * (2.0 + fi * 2.15) + drift;
                 float broad = snoise(samplePos * 0.31 + fi * 1.73);
                 float detail = snoise(samplePos * 0.72 - drift * 1.4 + fi * 3.1);
                 float cloud = smoothstep(0.03, 0.72, broad * 0.72 + detail * 0.28);
-                density += cloud * (0.24 - fi * 0.024);
-                colorNoise += detail * 0.09;
+                density += cloud * (0.29 - fi * 0.028);
+                colorNoise += detail * 0.08;
               }
               float horizon = 1.0 - smoothstep(0.22, 0.92, abs(ray.y));
               density *= 0.7 + horizon * 0.45;
               vec3 cool = mix(color2, color3, 0.24 + colorNoise);
               vec3 tint = mix(color * 0.72, cool, 0.34 + horizon * 0.16);
-              float alpha = density * (0.035 + audioLevel * 0.014);
-              gl_FragColor = vec4(tint * (0.22 + density * 0.16), alpha);
+              float bright = magAtmosphere * (1.0 + loudness * loudGlow * 0.38);
+              float alpha = density * (0.035 + audioLevel * 0.014) * magAtmosphere;
+              gl_FragColor = vec4(tint * (0.22 + density * 0.16) * bright, alpha);
             }
           `,
         })
@@ -1292,12 +1536,14 @@
     }
 
     _tick(dt) {
+      this._updatePerformance(dt);
       this._analyse();
       this.elapsed += dt;
       this._updateLiveColor();
       if (this.uniforms) {
         this.uniforms.time.value = this.elapsed;
         this.uniforms.audioLevel.value = this.energy;
+        this.uniforms.loudness.value = this.loudness;
         this.uniforms.bass.value = this.smoothBass;
       }
       if (this.mode === "pulse" || this.mode === "bloom" || this.mode === "magnetosphere") {
@@ -1308,21 +1554,26 @@
       if (this.mode === "bloom") this._tickBloom(dt);
       if (this.mode === "magnetosphere") this._tickMagnetosphere(dt);
       this._updateCamera(dt);
+      if (this.mode === "pulse") this._updatePulseArtwork();
       if (this.renderer) {
+        this.renderer.info.reset();
         if (this.mode === "magnetosphere" && this.magPost) {
           const preset = Math.max(0, this.mag?.preset || 0);
           const bloom = [1.32, 1.08, 0.92, 1.24][preset] || 1.18;
           const exposure = [1.08, 0.98, 1.04, 1.12][preset] || 1.05;
+          const loudBoost = this.loudness * this.params.loudGlow;
+          this.uniforms.magReflectionTex.value = this.magPost.reflectionTarget?.texture || null;
           this.magPost.render(this.scene, this.camera, {
             time: this.elapsed,
             threshold: preset === 2 ? 0.9 : 0.72,
             knee: 0.46,
-            bloomStrength: bloom + this.kick * 0.16,
-            exposure: exposure + this.energy * 0.08,
+            bloomStrength:
+              (bloom + this.kick * 0.16) * this.params.magBloom * (1 + loudBoost * 0.52),
+            exposure: exposure + this.energy * 0.08 + loudBoost * 0.18,
             saturation: preset === 2 ? 1.02 : 1.12,
             fineRadius: 1.15,
-            mediumRadius: preset === 3 ? 2.35 : 1.9,
-            veilRadius: preset === 0 ? 3.1 : 2.7,
+            mediumRadius: preset === 3 ? 3.1 : 2.65,
+            veilRadius: preset === 2 ? 3.5 : 4.2,
             voidLayer: MAG_VOID_LAYER,
           });
         } else {
@@ -1339,8 +1590,28 @@
       this.pulse.rotation.x = Math.sin(this.elapsed * 0.35) * 0.12;
       const s = 1 + this.kick * 0.08 + this.smoothBass * 0.05;
       this.pulse.scale.setScalar(s);
-      if (this.artMesh) this.artMesh.quaternion.copy(this.camera.quaternion);
+      if (this.artMesh) {
+        const targetScale =
+          1 + this.smoothBass * 0.075 + this.kick * 0.12 + this.loudness * this.params.loudGlow * 0.035;
+        this._artScale = (this._artScale ?? 1) + (targetScale - (this._artScale ?? 1)) * 0.16;
+        this.artMesh.scale.setScalar(this._artScale);
+        this.artMat.opacity = 0.48 + Math.min(0.13, this.loudness * this.params.loudGlow * 0.09);
+      }
       if (this.pulseDust) this.pulseDust.rotation.y -= dt * 0.04;
+    }
+
+    _updatePulseArtwork() {
+      if (!this.artMesh || !this.pulse || !this.camera) return;
+      this._pulseParentQuat ||= new THREE.Quaternion();
+      this._pulseCameraQuat ||= new THREE.Quaternion();
+      this.pulse.updateWorldMatrix(true, false);
+      this.camera.updateWorldMatrix(true, false);
+      this.pulse.getWorldQuaternion(this._pulseParentQuat);
+      this.camera.getWorldQuaternion(this._pulseCameraQuat);
+      this.artMesh.quaternion
+        .copy(this._pulseParentQuat)
+        .invert()
+        .multiply(this._pulseCameraQuat);
     }
 
     _tickRidge(dt) {
@@ -1351,6 +1622,7 @@
       const arr = pos.array;
       const carr = col.array;
       const [r, g, b] = this.liveAccent;
+      const loudBright = 1 + this.loudness * this.params.loudGlow * 0.72;
       const step = this._ridgeStep || 1;
       this.ridgeAcc += dt;
       const interval = RIDGE_STEP * step;
@@ -1388,9 +1660,13 @@
         const drawn = row % step === 0;
         for (let c = 0; c < RIDGE_COLS; c++) {
           const i = (row * RIDGE_COLS + c) * 3;
-          carr[i] = drawn ? Math.min(1.4, (r / 255) * fade + heat) : 0;
-          carr[i + 1] = drawn ? Math.min(1.4, (g / 255) * fade + heat * 0.55) : 0;
-          carr[i + 2] = drawn ? Math.min(1.4, (b / 255) * fade + heat * 0.2) : 0;
+          carr[i] = drawn ? Math.min(1.8, ((r / 255) * fade + heat) * loudBright) : 0;
+          carr[i + 1] = drawn
+            ? Math.min(1.8, ((g / 255) * fade + heat * 0.55) * loudBright)
+            : 0;
+          carr[i + 2] = drawn
+            ? Math.min(1.8, ((b / 255) * fade + heat * 0.2) * loudBright)
+            : 0;
         }
       }
       pos.needsUpdate = true;
@@ -1440,12 +1716,36 @@
       if (!mag) return;
       const t = this.elapsed;
       const step = Math.min(0.025, dt);
-      const simStep = this.magOptions.freeze ? 0 : step;
+      const simStep = this.magOptions.freeze ? 0 : step * this.params.magMotion;
       mag.simulationTime += simStep;
       const simT = mag.simulationTime;
       const kickRise = Math.max(0, this.kick - mag.prevKick);
       mag.pulse = Math.max(kickRise * 2.4, mag.pulse * Math.exp(-step * 4.8));
       mag.prevKick = this.kick;
+      const reflectionWave = Math.pow(
+        0.5 + 0.5 * Math.sin(t * 0.09 + Math.sin(t * 0.031) * 1.7),
+        1.65
+      );
+      this.magReflectivity = clamp(
+        this.params.magReflect +
+          this.params.magReflectAuto *
+            (reflectionWave * 0.72 + this.loudness * 0.34 + this.kick * 0.22),
+        0,
+        1
+      );
+      this.uniforms.magReflectivity.value = this.magReflectivity;
+      const densityWave =
+        0.5 +
+        0.31 * Math.sin(t * 0.047 - 0.9) +
+        0.19 * Math.sin(t * 0.019 + 1.6);
+      const densityTarget = clamp(
+        this.params.magDensity *
+          (1 - this.params.magDensityAuto * (0.68 - clamp(densityWave, 0, 1) * 0.68)) +
+          this.loudness * this.params.magDensityAuto * 0.07,
+        0.08,
+        1
+      );
+      mag.density += (densityTarget - mag.density) * (1 - Math.exp(-step * 0.75));
       const preset = this.magOptions.forcedPreset == null
         ? Math.floor(t / 30) % 4
         : ((this.magOptions.forcedPreset % 4) + 4) % 4;
@@ -1535,7 +1835,8 @@
           if (orb.v.lengthSq() > 2.56) orb.v.setLength(1.6);
           orb.p.addScaledVector(orb.v, simStep);
         }
-        const scale = orb.scale * (0.9 + band * 0.24 + mag.pulse * 0.11);
+        const scale =
+          orb.scale * this.params.magCoreSize * (0.9 + band * 0.24 + mag.pulse * 0.11);
         orb.mesh.position.copy(orb.p);
         orb.mesh.scale.setScalar(scale);
         if (preset === 0) orb.mesh.visible = i < 3;
@@ -1548,8 +1849,8 @@
 
       this.magnetosphereMid.lerp(mag.center, 1 - Math.exp(-step * 1.7));
       mag.trailAcc += step;
-      const sampleTrail = mag.trailAcc >= 1 / 30;
-      if (sampleTrail) mag.trailAcc %= 1 / 30;
+      const sampleTrail = mag.trailAcc >= 1 / 45;
+      if (sampleTrail) mag.trailAcc %= 1 / 45;
       if (simStep > 0) this._updateMagParticles(simStep, sampleTrail);
       this._updateMagRings();
       this.magnetosphereNebula.rotation.y += step * 0.009;
@@ -1572,7 +1873,7 @@
         mag.ringN.normalize();
         mag.ringB.crossVectors(orb.axis, mag.ringN).normalize();
         const tint = mag.palette[i % 3];
-        const radius = orb.scale * (0.9 + (i % 2) * 0.45);
+        const radius = orb.scale * this.params.magCoreSize * (0.9 + (i % 2) * 0.45);
         for (let s = 0; s < MAG_RING_SEGS; s++) {
           for (let end = 0; end < 2; end++) {
             const u = (s + end) / MAG_RING_SEGS;
@@ -1614,7 +1915,8 @@
       const a = this._magRandom() * Math.PI * 2;
       const rr = Math.sqrt(Math.max(0, 1 - z * z));
       mag.radial.set(Math.cos(a) * rr, z, Math.sin(a) * rr);
-      const shell = 0.42 + home.scale * (0.38 + this._magRandom() * 0.46);
+      const shell =
+        0.42 + home.scale * this.params.magCoreSize * (0.38 + this._magRandom() * 0.46);
       particle.p.copy(home.p).addScaledVector(mag.radial, shell);
       mag.axis.set(0.12 + Math.sin(a * 0.7), 1, 0.18 + Math.cos(a * 0.9)).normalize();
       mag.tangent.crossVectors(mag.radial, mag.axis);
@@ -1669,6 +1971,7 @@
       const sc = this.magSpikeCol.array;
       const sa = this.magSpikeAlpha.array;
       const center = mag.center;
+      const updateGeometry = sampleTrail || !mag.geometryReady;
       let lineVertex = 0;
 
       mag.flowCount.fill(0);
@@ -1687,6 +1990,7 @@
         p.age += dt;
         p.impactCooldown = Math.max(0, p.impactCooldown - dt);
         const live = this._bandMag(p.band);
+        const densityLife = clamp((mag.density - p.seed) * 14 + 0.5, 0, 1);
         const chargeSign = p.chargeTarget < 0 ? -1 : 1;
         p.chargeTarget = chargeSign * (0.24 + live * 0.92);
         p.charge += (p.chargeTarget - p.charge) * (1 - Math.exp(-dt * 3.2));
@@ -1755,7 +2059,7 @@
         p.p.addScaledVector(p.v, dt * (0.9 + live * 0.3));
 
         if (nearest && p.impactCooldown <= 0) {
-          const radius = 0.64 * nearest.scale + 0.09;
+          const radius = 0.64 * nearest.scale * this.params.magCoreSize + 0.09;
           const rawD2 = Math.max(0, nearestD2 - 0.24);
           if (rawD2 < radius * radius) {
             mag.radial.subVectors(p.p, nearest.p);
@@ -1767,7 +2071,7 @@
             p.p.copy(nearest.p).addScaledVector(mag.radial, radius + 0.025);
             p.home = (p.home + 1 + ((p.seed * 17) | 0)) % mag.orbs.length;
             p.impactCooldown = 0.42;
-            this._triggerMagImpact(p, live);
+            if (densityLife > 0.15) this._triggerMagImpact(p, live);
           }
         }
 
@@ -1795,6 +2099,7 @@
         const fadeIn = Math.min(1, p.age * 2.2);
         const fadeOut = Math.min(1, (p.life - p.age) * 0.9);
         const life = Math.max(0, Math.min(fadeIn, fadeOut));
+        const visibleLife = life * densityLife;
         const palettePos = clamp(p.band * 1.65 + (p.charge > 0 ? 0.2 : 0), 0, 1.99);
         const ci = Math.min(1, Math.floor(palettePos));
         const cf = palettePos - ci;
@@ -1816,9 +2121,9 @@
         hc[ho + 1] = gg;
         hc[ho + 2] = bb;
         hs[i] = p.size * (0.8 + live * 2.8 + mag.pulse * 0.7);
-        hl[i] = life * (0.45 + hot * 0.55);
+        hl[i] = visibleLife * (0.45 + hot * 0.55);
 
-        if (i < MAG_SPIKES) {
+        if (updateGeometry && i < MAG_SPIKES) {
           const spikeBase = i * 2;
           const origin = mag.orbs[p.home]?.p || center;
           const vx = p.p.x - origin.x;
@@ -1840,13 +2145,13 @@
             sc[vo] = rr;
             sc[vo + 1] = gg;
             sc[vo + 2] = bb;
-            sa[vertex] = life * (end ? 0.035 + live * 0.24 : 0.08 + live * 0.36);
+            sa[vertex] = visibleLife * (end ? 0.035 + live * 0.24 : 0.08 + live * 0.36);
           }
         }
 
-        for (let s = 0; s < MAG_TRAIL - 1; s++) {
+        if (updateGeometry) for (let s = 0; s < MAG_TRAIL - 1; s++) {
           const trailFade = 1 - s / (MAG_TRAIL - 1);
-          const alpha = life * trailFade * trailFade * (0.08 + hot * 0.42);
+          const alpha = visibleLife * trailFade * trailFade * (0.08 + hot * 0.42);
           for (let end = 0; end < 2; end++) {
             const so = (s + end) * 3;
             const vo = lineVertex * 3;
@@ -1861,7 +2166,7 @@
           }
         }
 
-        if (i < MAG_RIBBONS) {
+        if (updateGeometry && i < MAG_RIBBONS) {
           const ribbonBase = i * MAG_TRAIL * 2;
           for (let s = 0; s < MAG_TRAIL; s++) {
             const point = s * 3;
@@ -1907,8 +2212,9 @@
             }
             const ribbonScale = mag.preset === 3 ? 6.8 : mag.preset === 1 ? 2.1 : 1.25;
             const width =
-              (0.008 + p.size * 0.006 + live * 0.018) * profile * life * ribbonScale;
-            const alpha = life * Math.pow(trailFade, 0.8) * profile * (0.024 + hot * 0.12);
+              (0.008 + p.size * 0.006 + live * 0.018) *
+              profile * visibleLife * ribbonScale * this.params.magRibbon;
+            const alpha = visibleLife * Math.pow(trailFade, 0.8) * profile * (0.024 + hot * 0.12);
             for (let side = 0; side < 2; side++) {
               const sign = side ? -1 : 1;
               const vertex = ribbonBase + s * 2 + side;
@@ -1927,19 +2233,23 @@
       }
 
       this._updateMagFlares(dt);
-      this.magLinePos.needsUpdate = true;
-      this.magLineCol.needsUpdate = true;
-      this.magLineAlpha.needsUpdate = true;
+      if (updateGeometry) {
+        this.magLinePos.needsUpdate = true;
+        this.magLineCol.needsUpdate = true;
+        this.magLineAlpha.needsUpdate = true;
+        this.magRibbonPos.needsUpdate = true;
+        this.magRibbonCol.needsUpdate = true;
+        this.magRibbonAlpha.needsUpdate = true;
+        this.magSpikePos.needsUpdate = true;
+        this.magSpikeCol.needsUpdate = true;
+        this.magSpikeAlpha.needsUpdate = true;
+        mag.geometryReady = true;
+        mag.geometryBuilds++;
+      }
       this.magHeadPos.needsUpdate = true;
       this.magHeadCol.needsUpdate = true;
       this.magHeadSize.needsUpdate = true;
       this.magHeadLife.needsUpdate = true;
-      this.magRibbonPos.needsUpdate = true;
-      this.magRibbonCol.needsUpdate = true;
-      this.magRibbonAlpha.needsUpdate = true;
-      this.magSpikePos.needsUpdate = true;
-      this.magSpikeCol.needsUpdate = true;
-      this.magSpikeAlpha.needsUpdate = true;
     }
 
     _triggerMagImpact(particle, live) {
@@ -1992,11 +2302,13 @@
         } else {
           const p = mag.particles[(i * 137 + 19) % mag.particles.length];
           const live = this._bandMag(p.band);
+          const densityLife = clamp((mag.density - p.seed) * 14 + 0.5, 0, 1);
           fp[o] = p.p.x;
           fp[o + 1] = p.p.y;
           fp[o + 2] = p.p.z;
           fs[i] = (4 + p.size * 1.8) * (0.55 + live * 1.4);
-          fl[i] = (0.12 + live * live * 0.72) * Math.min(1, p.age * 2);
+          fl[i] =
+            (0.12 + live * live * 0.72) * Math.min(1, p.age * 2) * densityLife;
         }
         const eventColor = i >= 2 ? mag.flareEvents[i - 2]?.colorIndex : null;
         const colorIndex = eventColor == null ? i % 3 : eventColor;
@@ -2040,7 +2352,15 @@
       const spin = (p.bloomSpin ?? 1) * (1 + drift(0.012, 0.05, 0.5));
       this.bloomReact = react;
       this.bloom.rotation.y += dt * (0.09 + this.rawSmoothBass * 0.18 * react) * spin;
-      this.bloom.rotation.z = Math.sin(t * 0.13) * 0.1 * (0.4 + spin * 0.5);
+      this.bloom.rotation.x =
+        0.08 + Math.sin(t * 0.071 + 0.6) * 0.24 + Math.sin(t * 0.023) * 0.08;
+      this.bloom.rotation.z =
+        Math.sin(t * 0.053) * 0.2 + Math.sin(t * 0.019 + 1.8) * 0.07;
+      this.bloom.position.set(
+        Math.sin(t * 0.027) * 0.28,
+        Math.sin(t * 0.037 + 1.1) * 0.34,
+        Math.sin(t * 0.021 + 2.3) * 0.2
+      );
       this.bloom.scale.setScalar(1 + this.kick * 0.04 * react);
     }
 
@@ -2067,7 +2387,7 @@
       }
       if (this.mag) this.mag.cameraLocked = false;
       const zoom = clamp(this.params.ridgeZoom || 2.4, 2.2, 3.5);
-      const height = clamp(this.params.ridgeHeight || 1.15, 0.7, 2);
+      const height = clamp(this.params.ridgeHeight || 1.15, 0.7, 4.5);
       const u = (zoom - 2.2) / 1.3;
       let magnetosphereCam = [0, 0.85, 4.8];
       if (this.mode === "magnetosphere" && this.mag) {
@@ -2081,19 +2401,27 @@
           Math.cos(this.mag.yaw * 0.32) * 0.42 + rad,
         ];
       }
+      const bloomReact = this.bloomReact ?? Math.min(1.12, this.params.sensitivity ?? 1);
+      const bloomFlight = this.elapsed * 0.085 + 0.65;
+      const bloomThrough = Math.pow(Math.abs(Math.sin(bloomFlight)), 6);
       const targetFov = this.mode === "magnetosphere"
         ? [58, 52, 62, 66][Math.max(0, this.mag?.preset || 0)]
-        : 60;
+        : this.mode === "bloom" ? 64 + bloomThrough * 10 : 60;
       const nextFov = this.camera.fov + (targetFov - this.camera.fov) * Math.min(1, dt * 0.7);
       if (Math.abs(nextFov - this.camera.fov) > 0.001) {
         this.camera.fov = nextFov;
         this.camera.updateProjectionMatrix();
       }
-      const bloomReact = this.bloomReact ?? Math.min(1.12, this.params.sensitivity ?? 1);
+      const bloomRadius = 1.85 + Math.cos(bloomFlight * 2) * 0.55;
+      const bloomCam = [
+        Math.sin(bloomFlight) * bloomRadius,
+        0.4 + Math.sin(bloomFlight * 1.7 + 0.4) * 1.9 + Math.sin(bloomFlight * 3) * 0.28,
+        2 + Math.cos(bloomFlight) * 6.4 - this.kick * 0.12 * bloomReact,
+      ];
       const bases = {
         pulse: [0, 0.35, 7.2],
         ridge: [0, 7.1 + height * 0.75 - u * 0.2, 11.2 - u * 1.4],
-        bloom: [0, 1.55, 8.55 - bloomReact * 2.05],
+        bloom: bloomCam,
         magnetosphere: magnetosphereCam,
       };
       const base = bases[this.mode] || bases.pulse;
@@ -2106,7 +2434,8 @@
       let figX = 0;
       let figY = 0;
       let figZ = 0;
-      const look = new THREE.Vector3(0, 0, 0);
+      this._cameraLook ||= new THREE.Vector3();
+      const look = this._cameraLook.set(0, 0, 0);
       const t = this.elapsed;
       if (this.mode === "ridge") {
         const w = 0.26;
@@ -2120,9 +2449,10 @@
         this._fitRidgeToView(u);
         look.set(figX * 0.12, lookY + figY * 0.08, lookZ);
       } else if (this.mode === "bloom") {
-        figY = Math.sin(t * 0.2) * 1.15;
-        figX = Math.sin(t * 0.09) * 0.42;
-        look.set(0, figY * 0.18, 0);
+        look.copy(this.bloom.position);
+        look.x += Math.cos(bloomFlight) * 0.42 + Math.sin(t * 0.041) * 0.16;
+        look.y += Math.sin(bloomFlight * 2) * 0.3;
+        look.z -= Math.sin(bloomFlight) * 0.46;
       } else if (this.mode === "magnetosphere") {
         if (this.magnetosphereMid) look.copy(this.magnetosphereMid);
       }
@@ -2132,6 +2462,11 @@
         this._camBase.z + figZ
       );
       this.camera.lookAt(look);
+      if (this.mode === "bloom") {
+        this.camera.rotateZ(
+          Math.sin(bloomFlight) * 0.075 + Math.sin(bloomFlight * 3 + 0.5) * 0.025
+        );
+      }
     }
 
     _fitRidgeToView(zoomU) {
@@ -2214,8 +2549,10 @@
       let mid = 0;
       let high = 0;
       let peak = 0;
+      let power = 0;
       for (let i = 0; i < n; i++) {
         const v = freq[i] / 255;
+        power += v * v;
         if (v > peak) peak = v;
         if (i < bassN) bass += v;
         else if (i < midN) mid += v;
@@ -2224,8 +2561,17 @@
       bass /= bassN;
       mid /= midN - bassN;
       high /= Math.max(1, n - midN);
+      const rawPower = Math.sqrt(power / n);
       this.dynPeak = Math.max(peak, (this.dynPeak || 0.28) * 0.995);
       this.dynGain = Math.min(2.2, 0.86 / Math.max(0.18, this.dynPeak));
+      this.powerFast += (rawPower - this.powerFast) * 0.22;
+      this.powerSlow += (rawPower - this.powerSlow) * 0.025;
+      const sustained = clamp(this.powerFast * this.dynGain * 1.24, 0, 1.2);
+      const transient = clamp((this.powerFast - this.powerSlow) * this.dynGain * 3.4, 0, 0.65);
+      const loudTarget = clamp(sustained * 0.82 + transient, 0, 1.25);
+      const loudEase = loudTarget > this.loudness ? 0.24 : 0.065;
+      this.loudness += (loudTarget - this.loudness) * loudEase;
+      this.integratedPower = this.powerFast;
       this.rawSmoothBass += (bass - (this.rawSmoothBass || 0)) * 0.18;
       bass = this._shape(bass);
       mid = this._shape(mid);

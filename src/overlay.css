@@ -2,6 +2,12 @@ html.scviz-on {
   --scviz-playbar: var(--play-controls-height, 48px);
 }
 
+@property --scviz-iris {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+
 html.scviz-on,
 html.scviz-on body {
   overflow: hidden !important;
@@ -53,6 +59,7 @@ html.scviz-hide-sc-comments .commentPlaceholder {
 }
 
 #scviz-root {
+  --scviz-iris: 100%;
   position: fixed;
   top: 0;
   left: 0;
@@ -66,6 +73,195 @@ html.scviz-hide-sc-comments .commentPlaceholder {
     Garuda, Verdana, Tahoma, sans-serif;
   background: #070708;
   isolation: isolate;
+}
+
+#scviz-root::before,
+#scviz-root::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+
+#scviz-root::before {
+  z-index: 101;
+  background: radial-gradient(
+    circle at 50% 46%,
+    rgba(255, 255, 255, 0.2),
+    rgba(255, 112, 48, 0.08) 18%,
+    transparent 46%
+  );
+  mix-blend-mode: screen;
+}
+
+#scviz-root::after {
+  z-index: 100;
+  background: #030304;
+  -webkit-mask-image: radial-gradient(
+    circle at 50% 46%,
+    transparent 0,
+    transparent var(--scviz-iris),
+    #000 calc(var(--scviz-iris) + 6%)
+  );
+  mask-image: radial-gradient(
+    circle at 50% 46%,
+    transparent 0,
+    transparent var(--scviz-iris),
+    #000 calc(var(--scviz-iris) + 6%)
+  );
+}
+
+#scviz-root.scviz-entering::after {
+  animation: scviz-iris-open 0.88s cubic-bezier(0.2, 0.72, 0.18, 1) both;
+}
+
+#scviz-root.scviz-exiting::after {
+  animation: scviz-iris-close 0.72s cubic-bezier(0.62, 0, 0.3, 1) both;
+}
+
+#scviz-root.scviz-entering::before {
+  animation: scviz-transition-flare-in 0.9s ease-out both;
+}
+
+#scviz-root.scviz-exiting::before {
+  animation: scviz-transition-flare-out 0.72s ease-in both;
+}
+
+#scviz-root.scviz-entering .scviz-stage {
+  animation: scviz-stage-in 0.88s cubic-bezier(0.18, 0.74, 0.22, 1) both;
+}
+
+#scviz-root.scviz-exiting .scviz-stage {
+  animation: scviz-stage-out 0.72s cubic-bezier(0.58, 0, 0.32, 1) both;
+}
+
+#scviz-root.scviz-entering .scviz-wave {
+  animation: scviz-wave-in 0.8s 0.12s ease-out both;
+}
+
+#scviz-root.scviz-exiting .scviz-wave {
+  animation: scviz-wave-out 0.48s ease-in both;
+}
+
+#scviz-root.scviz-exiting {
+  pointer-events: none;
+}
+
+@keyframes scviz-iris-open {
+  0% {
+    --scviz-iris: 0%;
+    opacity: 1;
+  }
+  72% {
+    opacity: 1;
+  }
+  100% {
+    --scviz-iris: 105%;
+    opacity: 0;
+  }
+}
+
+@keyframes scviz-iris-close {
+  0% {
+    --scviz-iris: 105%;
+    opacity: 0;
+  }
+  16% {
+    opacity: 1;
+  }
+  100% {
+    --scviz-iris: 0%;
+    opacity: 1;
+  }
+}
+
+@keyframes scviz-transition-flare-in {
+  0%, 34% {
+    opacity: 0;
+    transform: scale(0.65);
+  }
+  55% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+@keyframes scviz-transition-flare-out {
+  0% {
+    opacity: 0;
+    transform: scale(1.2);
+  }
+  62% {
+    opacity: 0.42;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.58);
+  }
+}
+
+@keyframes scviz-stage-in {
+  0% {
+    opacity: 0.16;
+    transform: scale(1.1);
+  }
+  58% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes scviz-stage-out {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0.1;
+    transform: scale(1.075);
+  }
+}
+
+@keyframes scviz-wave-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scviz-wave-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #scviz-root.scviz-entering::before,
+  #scviz-root.scviz-entering::after,
+  #scviz-root.scviz-exiting::before,
+  #scviz-root.scviz-exiting::after,
+  #scviz-root.scviz-entering .scviz-stage,
+  #scviz-root.scviz-exiting .scviz-stage,
+  #scviz-root.scviz-entering .scviz-wave,
+  #scviz-root.scviz-exiting .scviz-wave {
+    animation-duration: 0.08s;
+  }
 }
 
 html.scviz-on #scviz-root {
@@ -303,7 +499,8 @@ html.scviz-on #scviz-root {
 }
 
 #scviz-root.scviz-mode-bloom .scviz-tray-item[data-for="bloom"],
-#scviz-root.scviz-mode-ridge .scviz-tray-item[data-for="ridge"] {
+#scviz-root.scviz-mode-ridge .scviz-tray-item[data-for="ridge"],
+#scviz-root.scviz-mode-magnetosphere .scviz-tray-item[data-for="magnetosphere"] {
   display: flex;
 }
 

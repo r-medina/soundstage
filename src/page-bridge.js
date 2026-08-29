@@ -1,6 +1,13 @@
 "use strict";
 
 (() => {
+  let audioActive = false;
+  window.addEventListener("message", (event) => {
+    const data = event.data;
+    if (data?.source === "scviz-control" && data.type === "audio-active") {
+      audioActive = Boolean(data.active);
+    }
+  });
   const NativeAC = window.AudioContext || window.webkitAudioContext;
   if (NativeAC) wrapAudioContext(NativeAC);
 
@@ -45,7 +52,7 @@
     if (window.__scvizAnalyser) return;
     try {
       const analyser = ctx.createAnalyser();
-      analyser.fftSize = 8192;
+      analyser.fftSize = 4096;
       analyser.smoothingTimeConstant = 0.38;
       analyser.minDecibels = -90;
       analyser.maxDecibels = -22;
@@ -63,19 +70,20 @@
 
     const freqFull = new Uint8Array(analyser.frequencyBinCount);
     const timeFull = new Uint8Array(analyser.fftSize);
-    const freq = new Array(256);
-    const time = new Array(512);
+    const freq = new Uint8Array(256);
+    const time = new Uint8Array(512);
 
     const tick = () => {
       const a = window.__scvizAnalyser;
-      if (a) {
+      if (a && audioActive) {
         a.getByteFrequencyData(freqFull);
         a.getByteTimeDomainData(timeFull);
         logBucket(freqFull, freq, a);
         pick(timeFull, time);
         post({ type: "audio", freq, time });
       }
-      requestAnimationFrame(tick);
+      if (audioActive) requestAnimationFrame(tick);
+      else setTimeout(tick, 200);
     };
     tick();
   }

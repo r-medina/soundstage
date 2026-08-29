@@ -3,6 +3,9 @@
 (() => {
   const PLAYBAR_BTN_CLASS = "scviz-playbar-btn";
   const MODES = () => SCVizVisualizer.modes;
+  const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const ENTER_TRANSITION_MS = REDUCED_MOTION ? 80 : 920;
+  const EXIT_TRANSITION_MS = REDUCED_MOTION ? 80 : 760;
 
   const state = {
     on: false,
@@ -30,6 +33,8 @@
     captureTried: false,
     viz: null,
     raf: 0,
+    transitionTimer: 0,
+    transitionEpoch: 0,
     accent: [255, 85, 0],
     params: {
       bloomBright: 0.72,
@@ -48,6 +53,18 @@
       ridgeFreq: 1,
       ridgeFuzz: 0.28,
       sensitivity: 1,
+      loudGlow: 0.85,
+      magReflect: 0.04,
+      magReflectAuto: 0.52,
+      magVoidGlow: 0.12,
+      magDensity: 0.88,
+      magDensityAuto: 0.58,
+      magTrail: 1,
+      magRibbon: 1,
+      magAtmosphere: 1,
+      magBloom: 1,
+      magMotion: 1,
+      magCoreSize: 1,
     },
   };
 
@@ -87,6 +104,8 @@
 
   function shutdown() {
     try {
+      clearTimeout(state.transitionTimer);
+      setPageAudioActive(false);
       cancelAnimationFrame(state.raf);
       if (trackTimer) clearInterval(trackTimer);
       playbarObserver?.disconnect();
@@ -344,27 +363,52 @@
 
   async function setOn(on) {
     if (!alive()) return;
+    const transitionEpoch = ++state.transitionEpoch;
+    clearTimeout(state.transitionTimer);
     state.on = on;
-    document.documentElement.classList.toggle("scviz-on", on);
     syncButton();
     if (!on) {
+      cancelAnimationFrame(state.raf);
+      setPageAudioActive(false);
       teardownCapture();
-      state.viz?.stop();
-      applyCommentMode();
       clearTimeout(chromeTimer);
-      root?.classList.remove("scviz-chrome-idle");
+      if (!root || !document.documentElement.classList.contains("scviz-on")) {
+        state.viz?.stop();
+        document.documentElement.classList.remove("scviz-on");
+        applyCommentMode();
+        return;
+      }
+      root.classList.remove("scviz-entering", "scviz-chrome-idle");
+      root.classList.add("scviz-exiting");
+      state.transitionTimer = window.setTimeout(() => {
+        if (state.on || state.transitionEpoch !== transitionEpoch) return;
+        state.viz?.stop();
+        root?.classList.remove("scviz-exiting");
+        document.documentElement.classList.remove("scviz-on");
+        applyCommentMode();
+      }, EXIT_TRANSITION_MS);
       return;
     }
+    document.documentElement.classList.add("scviz-on");
+    setPageAudioActive(true);
     readTrack();
     try {
       ensureOverlay();
     } catch (err) {
       console.error("SCViz overlay failed", err);
       state.on = false;
+      setPageAudioActive(false);
       document.documentElement.classList.remove("scviz-on");
       syncButton();
       return;
     }
+    root.classList.remove("scviz-entering", "scviz-exiting", "scviz-chrome-idle");
+    void root.offsetWidth;
+    root.classList.add("scviz-entering");
+    state.transitionTimer = window.setTimeout(() => {
+      if (!state.on || state.transitionEpoch !== transitionEpoch) return;
+      root?.classList.remove("scviz-entering");
+    }, ENTER_TRANSITION_MS);
     paintMeta();
     state.mode = state.viz.setMode(state.mode);
     state.viz.resize();
@@ -378,7 +422,13 @@
     startProgressLoop();
     flashHint();
     wakeChrome();
-    if (performance.now() - state.tapAliveAt > 500) maybeStartCapture();
+    window.setTimeout(() => {
+      if (state.on && performance.now() - state.tapAliveAt > 500) maybeStartCapture();
+    }, 320);
+  }
+
+  function setPageAudioActive(active) {
+    window.postMessage({ source: "scviz-control", type: "audio-active", active }, "*");
   }
 
   function flashHint() {
@@ -448,6 +498,7 @@
         h("div", { class: "scviz-tray" }, [
           h("div", { class: "scviz-tray-panel" }, [
             paramSlider("sensitivity", "Sensitivity", 0, 2.2, 0.05, "all"),
+            paramSlider("loudGlow", "Loud glow", 0, 2, 0.05, "all"),
             paramSlider("bloomBright", "Bright", 0.58, 1, 0.01, "bloom"),
             paramSlider("bloomSize", "Size", 0.4, 2.2, 0.05, "bloom"),
             paramSlider("bloomSpread", "Spread", 0, 1.6, 0.05, "bloom"),
@@ -459,10 +510,21 @@
             paramSlider("bloomSoft", "Soft", 0, 1, 0.01, "bloom"),
             paramSlider("bloomTight", "Tight", 0, 1, 0.01, "bloom"),
             paramSlider("ridgeZoom", "Zoom", 2.2, 3.5, 0.05, "ridge"),
-            paramSlider("ridgeHeight", "Height", 0.7, 2.0, 0.05, "ridge"),
+            paramSlider("ridgeHeight", "Height", 0.7, 4.5, 0.05, "ridge"),
             paramSlider("ridgeThick", "Thick", 0.15, 2, 0.05, "ridge"),
             paramSlider("ridgeFreq", "Freq", 0.2, 1, 0.01, "ridge"),
             paramSlider("ridgeFuzz", "Fuzz", 0, 1, 0.01, "ridge"),
+            paramSlider("magReflect", "Reflect", 0, 1, 0.01, "magnetosphere"),
+            paramSlider("magReflectAuto", "Reflect flow", 0, 1, 0.01, "magnetosphere"),
+            paramSlider("magVoidGlow", "Void halo", 0, 1, 0.01, "magnetosphere"),
+            paramSlider("magDensity", "Density", 0.1, 1, 0.01, "magnetosphere"),
+            paramSlider("magDensityAuto", "Density flow", 0, 1, 0.01, "magnetosphere"),
+            paramSlider("magTrail", "Trails", 0.2, 2.5, 0.05, "magnetosphere"),
+            paramSlider("magRibbon", "Ribbons", 0, 2.5, 0.05, "magnetosphere"),
+            paramSlider("magAtmosphere", "Atmosphere", 0, 2, 0.05, "magnetosphere"),
+            paramSlider("magBloom", "Bloom", 0.2, 2, 0.05, "magnetosphere"),
+            paramSlider("magMotion", "Motion", 0.25, 2, 0.05, "magnetosphere"),
+            paramSlider("magCoreSize", "Core size", 0.6, 1.6, 0.05, "magnetosphere"),
           ]),
         ]),
         h("div", { class: "scviz-center" }, [
@@ -617,11 +679,23 @@
     bloomSoft: [0, 1, 0.55],
     bloomTight: [0, 1, 0],
     ridgeZoom: [2.2, 3.5, 2.4],
-    ridgeHeight: [0.7, 2, 1.15],
+    ridgeHeight: [0.7, 4.5, 1.15],
     ridgeThick: [0.15, 2, 0.55],
     ridgeFreq: [0.2, 1, 1],
     ridgeFuzz: [0, 1, 0.28],
     sensitivity: [0, 2.2, 1],
+    loudGlow: [0, 2, 0.85],
+    magReflect: [0, 1, 0.04],
+    magReflectAuto: [0, 1, 0.52],
+    magVoidGlow: [0, 1, 0.12],
+    magDensity: [0.1, 1, 0.88],
+    magDensityAuto: [0, 1, 0.58],
+    magTrail: [0.2, 2.5, 1],
+    magRibbon: [0, 2.5, 1],
+    magAtmosphere: [0, 2, 1],
+    magBloom: [0.2, 2, 1],
+    magMotion: [0.25, 2, 1],
+    magCoreSize: [0.6, 1.6, 1],
   };
 
   function clampParams(params) {
@@ -1185,7 +1259,7 @@
     if (ctx.state === "suspended") await ctx.resume();
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
-    analyser.fftSize = 8192;
+    analyser.fftSize = 4096;
     analyser.smoothingTimeConstant = 0.38;
     analyser.minDecibels = -90;
     analyser.maxDecibels = -22;
@@ -1193,8 +1267,8 @@
     source.connect(ctx.destination);
     const freq = new Uint8Array(analyser.frequencyBinCount);
     const time = new Uint8Array(analyser.fftSize);
-    const outF = new Array(256);
-    const outT = new Array(512);
+    const outF = new Uint8Array(256);
+    const outT = new Uint8Array(512);
 
     const tick = () => {
       if (!state.capture || !alive()) return;

@@ -15,6 +15,7 @@
       this.enabled = true;
       this.width = 0;
       this.height = 0;
+      this.lastReflectionTime = -Infinity;
       this.type = THREE.HalfFloatType || THREE.UnsignedByteType;
       this.passScene = new THREE.Scene();
       this.passCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -148,7 +149,7 @@
             float voidMask = texture2D(voidMaskTex, vUv).r;
             float voidSolid = smoothstep(0.08, 0.92, voidMask);
             float voidCutout = 1.0 - voidSolid;
-            vec3 bloom = bloomStrength * (fine * 0.72 + medium * 0.62 + veil * 0.48);
+            vec3 bloom = bloomStrength * (fine * 0.68 + medium * 0.78 + veil * 0.54);
             vec3 color = sharp + bloom * voidCutout;
             color *= exposure;
             color = acesFilm(color);
@@ -159,8 +160,7 @@
             color *= mix(0.68, 1.0, vignette);
             color = linearToSrgb(max(color, 0.0));
             float grain = (hash(gl_FragCoord.xy + time * 71.0) - 0.5) * 0.012;
-            color += grain * (0.25 + 0.75 * (1.0 - luma));
-            color *= 1.0 - voidSolid;
+            color += grain * (0.25 + 0.75 * (1.0 - luma)) * (1.0 - voidSolid);
             gl_FragColor = vec4(max(color, 0.0), 1.0);
           }
         `,
@@ -196,13 +196,11 @@
       if (width === this.width && height === this.height) return;
       this.width = width;
       this.height = height;
+      this.lastReflectionTime = -Infinity;
       this._disposeTargets();
       this.sceneTarget = this._target(width, height, true);
       this.voidMaskTarget = this._target(width, height, false, THREE.UnsignedByteType);
-      if (this.renderer.capabilities.isWebGL2) {
-        this.sceneTarget.samples = 4;
-        this.voidMaskTarget.samples = 4;
-      }
+      this.reflectionTarget = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
       this.halfA = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
       this.halfB = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
       this.quarterA = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
@@ -240,13 +238,26 @@
       const renderer = this.renderer;
       const previousTarget = renderer.getRenderTarget();
       const previousAutoClear = renderer.autoClear;
+      const previousLayerMask = camera.layers.mask;
       renderer.autoClear = false;
       try {
+        const reflectionTime = options.time ?? 0;
+        if (
+          reflectionTime < this.lastReflectionTime ||
+          reflectionTime - this.lastReflectionTime >= 1 / 30
+        ) {
+          camera.layers.set(options.reflectionLayer ?? 0);
+          renderer.setRenderTarget(this.reflectionTarget);
+          renderer.clear(true, true, true);
+          renderer.render(scene, camera);
+          camera.layers.mask = previousLayerMask;
+          this.lastReflectionTime = reflectionTime;
+        }
+
         renderer.setRenderTarget(this.sceneTarget);
         renderer.clear(true, true, true);
         renderer.render(scene, camera);
 
-        const previousLayerMask = camera.layers.mask;
         const previousOverride = scene.overrideMaterial;
         const previousClearAlpha = renderer.getClearAlpha();
         renderer.getClearColor(this.savedClearColor);
@@ -271,11 +282,11 @@
 
         this.copyMaterial.uniforms.inputTex.value = this.halfA.texture;
         this._draw(this.copyMaterial, this.quarterA);
-        this._blur(this.quarterA, this.quarterB, this.quarterA, options.mediumRadius ?? 1.9);
+        this._blur(this.quarterA, this.quarterB, this.quarterA, options.mediumRadius ?? 2.65);
 
         this.copyMaterial.uniforms.inputTex.value = this.quarterA.texture;
         this._draw(this.copyMaterial, this.eighthA);
-        this._blur(this.eighthA, this.eighthB, this.eighthA, options.veilRadius ?? 2.7);
+        this._blur(this.eighthA, this.eighthB, this.eighthA, options.veilRadius ?? 4.2);
 
         const composite = this.compositeMaterial.uniforms;
         composite.sceneTex.value = this.sceneTarget.texture;
@@ -295,6 +306,7 @@
         renderer.clear(true, true, true);
         renderer.render(scene, camera);
       } finally {
+        camera.layers.mask = previousLayerMask;
         renderer.autoClear = previousAutoClear;
         if (previousTarget) renderer.setRenderTarget(previousTarget);
       }
@@ -304,6 +316,7 @@
       for (const name of [
         "sceneTarget",
         "voidMaskTarget",
+        "reflectionTarget",
         "halfA",
         "halfB",
         "quarterA",
@@ -324,6 +337,13 @@
       this.blurMaterial.dispose();
       this.compositeMaterial.dispose();
       this.voidMaskMaterial.dispose();
+    }
+
+    releaseTargets() {
+      this._disposeTargets();
+      this.width = 0;
+      this.height = 0;
+      this.lastReflectionTime = -Infinity;
     }
   }
 
