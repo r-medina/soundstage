@@ -81,7 +81,8 @@ assert.equal(post.voidMaskTarget.samples, 0);
 assert.equal(post.reflectionTarget.width, 640);
 assert.equal(post.reflectionTarget.height, 360);
 assert.ok(post.compositeMaterial.uniforms.voidMaskTex);
-assert.equal(post.eighthA.width, 160);
+assert.equal(post.auraTarget.width, 214);
+assert.ok(post.compositeMaterial.uniforms.bloomAura);
 post.releaseTargets();
 assert.equal(post.sceneTarget, null);
 assert.equal(post.width, 0);
@@ -144,6 +145,9 @@ pulseProbe.artMesh.getWorldQuaternion(artWorldQuat);
 pulseProbe.camera.getWorldQuaternion(cameraWorldQuat);
 assert.ok(Math.abs(artWorldQuat.dot(cameraWorldQuat)) > 0.999999);
 
+const RING_SEGS = 64;
+const RINGS_PER_ORB = 2;
+const CORE_RADIUS = 0.64;
 const presetSummary = [];
 for (let preset = 0; preset < 4; preset++) {
   const viz = makeVisualizer(seed, preset);
@@ -151,14 +155,58 @@ for (let preset = 0; preset < 4; preset++) {
   assert.equal(viz.mag.preset, preset);
   assert.ok(viz.magRingPos.array.every(Number.isFinite));
   assert.ok(viz.magSpikePos.array.every(Number.isFinite));
+  const visible = viz.mag.orbs.filter((orb) => orb.mesh.visible);
+  const ringCount = viz.magnetosphereRings.geometry.drawRange.count;
+  assert.equal(ringCount, visible.length * RINGS_PER_ORB * RING_SEGS * 2);
+  const ringPos = viz.magRingPos.array;
+  for (let v = 0; v < ringCount; v++) {
+    const x = ringPos[v * 3];
+    const y = ringPos[v * 3 + 1];
+    const z = ringPos[v * 3 + 2];
+    let aroundOrb = false;
+    for (const orb of visible) {
+      const dx = x - orb.p.x;
+      const dy = y - orb.p.y;
+      const dz = z - orb.p.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const coreR = CORE_RADIUS * orb.visualScale;
+      if (dist > coreR * 1.08 && dist < coreR * 1.7) aroundOrb = true;
+    }
+    assert.ok(aroundOrb, `preset ${preset} ring vertex ${v} is not around a visible orb`);
+  }
+  for (let i = 0; i < visible.length; i++) {
+    for (let j = i + 1; j < visible.length; j++) {
+      const minD =
+        CORE_RADIUS * (visible[i].visualScale + visible[j].visualScale) + 0.08;
+      assert.ok(
+        visible[i].p.distanceTo(visible[j].p) + 1e-4 >= minD,
+        `preset ${preset} orbs ${i} and ${j} overlap`
+      );
+    }
+  }
   presetSummary.push({
     preset,
     hairs: viz.magnetosphereLines.geometry.drawRange.count,
     ribbons: viz.magnetosphereRibbons.geometry.drawRange.count,
     spikes: viz.magnetosphereSpikes.geometry.drawRange.count,
-    visibleCores: viz.mag.orbs.filter((orb) => orb.mesh.visible).length,
+    visibleCores: visible.length,
+    ringVerts: ringCount,
   });
 }
+
+const collide = makeVisualizer(seed, 1);
+collide.mag.preset = 1;
+for (const orb of collide.mag.orbs) {
+  orb.mesh.visible = true;
+  orb.visualScale = 1;
+  orb.v.set(0, 0, 0);
+}
+collide.mag.orbs[0].p.set(0, 0, 0);
+collide.mag.orbs[1].p.set(0.12, 0, 0);
+collide._separateMagOrbs();
+assert.ok(
+  collide.mag.orbs[0].p.distanceTo(collide.mag.orbs[1].p) >= CORE_RADIUS * 2 + 0.09
+);
 
 const stress = makeVisualizer(seed ^ 0x9e3779b9, 3);
 Object.assign(stress.params, {

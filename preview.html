@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SCViz Visualizer Lab</title>
+    <title>Soundstage Visualizer Lab</title>
     <style>
       :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
       * { box-sizing: border-box; }
@@ -36,7 +36,8 @@
       .knob[data-for]:not([data-for="all"]) { display: none; }
       body[data-mode="bloom"] .knob[data-for="bloom"],
       body[data-mode="ridge"] .knob[data-for="ridge"],
-      body[data-mode="magnetosphere"] .knob[data-for="magnetosphere"] { display: grid; }
+      body[data-mode="magnetosphere"] .knob[data-for="magnetosphere"],
+      body[data-mode="pulse"] .knob[data-for="pulse"] { display: grid; }
       [hidden] { display: none !important; }
       .knob input { grid-column: 1 / -1; width: 100%; height: 20px; }
       .knob output { color: rgba(255,255,255,.82); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -50,7 +51,7 @@
     <canvas id="viz"></canvas>
     <canvas id="wave"></canvas>
     <div class="panel" id="panel">
-      <span class="brand">SCViz Lab</span>
+      <span class="brand">Soundstage Lab</span>
       <label>Visualizer
         <select id="mode">
           <option value="magnetosphere" selected>Magnetosphere</option>
@@ -90,7 +91,8 @@
       <div class="knobs" id="knobs">
         <label class="knob" data-for="all"><span>Sensitivity</span><output></output><input data-param="sensitivity" type="range" min="0" max="2.2" step="0.05" value="1"></label>
         <label class="knob" data-for="all"><span>Loud glow</span><output></output><input data-param="loudGlow" type="range" min="0" max="2" step="0.05" value="0.85"></label>
-        <label class="knob" data-for="bloom"><span>Bright</span><output></output><input data-param="bloomBright" type="range" min="0.58" max="1" step="0.01" value="0.72"></label>
+        <label class="knob" data-for="pulse"><span>Cover art</span><output></output><input data-param="pulseArt" type="checkbox" checked></label>
+        <label class="knob" data-for="bloom"><span>Bright</span><output></output><input data-param="bloomBright" type="range" min="0.58" max="0.85" step="0.01" value="0.72"></label>
         <label class="knob" data-for="bloom"><span>Size</span><output></output><input data-param="bloomSize" type="range" min="0.4" max="2.2" step="0.05" value="1"></label>
         <label class="knob" data-for="bloom"><span>Spread</span><output></output><input data-param="bloomSpread" type="range" min="0" max="1.6" step="0.05" value="0.55"></label>
         <label class="knob" data-for="bloom"><span>Spin</span><output></output><input data-param="bloomSpin" type="range" min="0" max="2.5" step="0.05" value="1"></label>
@@ -176,28 +178,34 @@
 
       const readLabParams = () => {
         try {
-          return JSON.parse(localStorage.getItem("scviz-mag-lab-params") || "{}");
+          return JSON.parse(localStorage.getItem("soundstage-mag-lab-params") || "{}");
         } catch {
           return {};
         }
       };
       const writeLabParams = (params) => {
         try {
-          localStorage.setItem("scviz-mag-lab-params", JSON.stringify(params));
+          localStorage.setItem("soundstage-mag-lab-params", JSON.stringify(params));
         } catch {}
       };
       const savedParams = readLabParams();
       document.querySelectorAll("#knobs input[data-param]").forEach((input) => {
         const key = input.dataset.param;
-        if (Number.isFinite(Number(savedParams[key]))) input.value = String(savedParams[key]);
         const output = input.parentElement.querySelector("output");
+        const isCheck = input.type === "checkbox";
+        if (Number.isFinite(Number(savedParams[key]))) {
+          if (isCheck) input.checked = Number(savedParams[key]) >= 0.5;
+          else input.value = String(savedParams[key]);
+        }
         const apply = () => {
-          const value = Number(input.value);
-          output.value = value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+          const value = isCheck ? (input.checked ? 1 : 0) : Number(input.value);
+          output.value = isCheck
+            ? value ? "On" : "Off"
+            : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
           viz.setParams({ [key]: value });
           writeLabParams({ ...readLabParams(), [key]: value });
         };
-        input.addEventListener("input", apply);
+        input.addEventListener(isCheck ? "change" : "input", apply);
         apply();
       });
 
@@ -330,7 +338,7 @@
       document.querySelector("#shot").addEventListener("click", () => {
         viz._tick(0);
         const link = document.createElement("a");
-        link.download = `scviz-${viz.mode}-${Date.now()}.png`;
+        link.download = `soundstage-${viz.mode}-${Date.now()}.png`;
         link.href = canvas.toDataURL("image/png");
         link.click();
       });

@@ -1,4 +1,4 @@
-# SCViz
+# Soundstage
 
 A Chrome extension that adds a **visualizer / playing mode** to [SoundCloud](https://soundcloud.com).
 
@@ -9,12 +9,15 @@ While a track plays, a button appears in the player bar. Toggle it and the page 
 [![License: MIT](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
 <p>
-  <img src="store/screenshots/01-pulse.png" alt="Pulse visualizer" width="48%">
-  <img src="store/screenshots/02-ridge.png" alt="Ridge visualizer" width="48%">
+  <img src="store/screenshots/01-magnetosphere.png" alt="Magnetosphere playing mode on SoundCloud" width="100%">
 </p>
 <p>
-  <img src="store/screenshots/03-bloom.png" alt="Bloom visualizer" width="48%">
-  <img src="store/screenshots/04-magnetosphere.png" alt="Magnetosphere visualizer" width="48%">
+  <img src="store/screenshots/02-magnetosphere-close.png" alt="Magnetosphere close-up" width="48%">
+  <img src="store/screenshots/03-ridge.png" alt="Ridge visualizer" width="48%">
+</p>
+<p>
+  <img src="store/screenshots/04-bloom.png" alt="Bloom visualizer" width="48%">
+  <img src="store/screenshots/05-bloom-close.png" alt="Bloom close-up" width="48%">
 </p>
 
 ## Visualizers

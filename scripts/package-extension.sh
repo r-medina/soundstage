@@ -2,7 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/store/dist"
-name="scviz"
+name="soundstage"
 version="$(python3 -c "import json; print(json.load(open('$root/manifest.json'))['version'])")"
 mkdir -p "$out"
 zipfile="$out/${name}-${version}.zip"

@@ -1,8 +1,8 @@
 # Security
 
-SCViz captures tab audio and talks to SoundCloud from the extension. Please report vulnerabilities privately instead of opening a public issue.
+Soundstage captures tab audio and talks to SoundCloud from the extension. Please report vulnerabilities privately instead of opening a public issue.
 
-**Contact:** GitHub Security Advisories on [github.com/r-medina/scviz](https://github.com/r-medina/scviz/security/advisories/new), or an email to the address on [ricky’s GitHub profile](https://github.com/r-medina).
+**Contact:** GitHub Security Advisories on [github.com/r-medina/soundstage](https://github.com/r-medina/soundstage/security/advisories/new), or an email to the address on [ricky’s GitHub profile](https://github.com/r-medina).
 
 Please include:
 

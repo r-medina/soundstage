@@ -24,8 +24,17 @@
   const MAG_RIBBONS = 72;
   const MAG_SPIKES = 260;
   const MAG_RING_SEGS = 64;
+  const MAG_RINGS_PER_ORB = 2;
+  const MAG_CORE_RADIUS = 0.64;
   const MAG_NEBULA = 720;
   const MAG_VOID_LAYER = 30;
+
+  function magOrbShown(preset, index) {
+    if (preset === 0) return index < 3;
+    if (preset === 1) return true;
+    if (preset === 2) return false;
+    return index < 2;
+  }
 
   const SNOISE = `
     vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
@@ -119,6 +128,7 @@
         ridgeThick: 0.55,
         ridgeFreq: 1,
         ridgeFuzz: 0.28,
+        pulseArt: 1,
         sensitivity: 1,
         loudGlow: 0.85,
         magReflect: 0.04,
@@ -139,6 +149,7 @@
       this.dynGain = 1;
       this._camBase = null;
       this.ridgeAcc = 0;
+      this.bloomDance = 0;
       this.magnetosphereMid = null;
       this.magQualityScale = 1;
       this.frameMsSmooth = 16.7;
@@ -181,6 +192,7 @@
           this.resize();
         }
       }
+      this._syncPulseArt();
       return this.mode;
     }
 
@@ -199,7 +211,7 @@
       if (!partial) return;
       Object.assign(this.params, partial);
       const limits = {
-        bloomBright: [0.58, 1],
+        bloomBright: [0.58, 0.85],
         bloomSize: [0.4, 2.2],
         bloomSpread: [0, 1.6],
         bloomSpin: [0, 2.5],
@@ -214,6 +226,7 @@
         ridgeThick: [0.15, 2],
         ridgeFreq: [0.2, 1],
         ridgeFuzz: [0, 1],
+        pulseArt: [0, 1],
         sensitivity: [0, 2.2],
         loudGlow: [0, 2],
         magReflect: [0, 1],
@@ -233,6 +246,7 @@
         if (this.uniforms?.[key]) this.uniforms[key].value = this.params[key];
       }
       if (this.ridgeGeo) this._syncRidgeIndex();
+      this._syncPulseArt();
     }
 
     cycleMode() {
@@ -283,6 +297,7 @@
             if (this.artMat.map) this.artMat.map.dispose();
             this.artMat.map = tex;
             this.artMat.needsUpdate = true;
+            this._syncPulseArt();
           });
         })
         .catch(() => {});
@@ -373,7 +388,7 @@
 
     _initThree() {
       if (typeof THREE === "undefined") {
-        console.error("SCViz: THREE is missing");
+        console.error("Soundstage: THREE is missing");
         return;
       }
       this.renderer = new THREE.WebGLRenderer({
@@ -417,6 +432,7 @@
         bloomSoft: { value: this.params.bloomSoft },
         bloomTight: { value: this.params.bloomTight },
         bloomReact: { value: 1 },
+        bloomDance: { value: 0 },
         color2: { value: new THREE.Color(0.16, 0.55, 1) },
         color3: { value: new THREE.Color(1, 0.55, 0.18) },
         ridgeThick: { value: this.params.ridgeThick },
@@ -535,6 +551,7 @@
       });
       this.artMesh = new THREE.Mesh(new THREE.CircleGeometry(0.82, 48), this.artMat);
       this.artMesh.renderOrder = 1;
+      this.artMesh.visible = false;
       const count = 2200;
       const pPos = new Float32Array(count * 3);
       const pSize = new Float32Array(count);
@@ -905,15 +922,18 @@
           uniform float bloomShape;
           uniform float bloomTight;
           uniform float bloomReact;
+          uniform float bloomDance;
           varying float vAlpha;
           varying float vGain;
           varying float vLive;
           varying float vBand;
           varying float vSeed;
+          varying float vNearFade;
           void main() {
             float g = texture2D(bands, vec2(band * 0.97 + 0.015, 0.5)).r;
             g = pow(g, 0.95);
             float live = g * bloomReact;
+            float motion = mix(live, bloomDance, 0.38);
             vGain = g;
             vLive = live;
             vBand = band;
@@ -922,13 +942,14 @@
             pos *= mix(1.42, 0.4, bloomTight);
             pos.y *= mix(1.0, 0.1, bloomShape);
             pos.xz *= mix(1.0, 1.0 + bloomShape * 0.42, bloomShape);
-            float pulse = 1.0 + live * bloomSpread * 0.22;
+            float pulse = 1.0 + motion * bloomSpread * 0.22;
             vec4 mv = modelViewMatrix * vec4(pos * pulse, 1.0);
             gl_Position = projectionMatrix * mv;
             float dist = -mv.z;
-            float size = psize * bloomSize * mix(32.0, 52.0, live);
-            gl_PointSize = size / max(dist * 0.42, 0.5);
-            vAlpha = 0.42 + seed * 0.16 + live * 0.16;
+            float size = psize * bloomSize * mix(32.0, 52.0, motion);
+            gl_PointSize = min(86.0, size / max(dist * 0.42, 0.65));
+            vNearFade = smoothstep(0.48, 1.8, dist);
+            vAlpha = (0.3 + seed * 0.12 + live * 0.12) * vNearFade;
           }
         `,
         fragmentShader: `
@@ -949,11 +970,15 @@
           varying float vLive;
           varying float vBand;
           varying float vSeed;
+          varying float vNearFade;
           void main() {
             vec2 p = gl_PointCoord - 0.5;
             float d = length(p);
             if (d > 0.5) discard;
-            float glow = pow(1.0 - d * 2.0, mix(2.2, 1.15, bloomSoft));
+            float edge = 1.0 - smoothstep(0.42, 0.5, d);
+            float halo = exp(-d * d * mix(15.0, 8.5, bloomSoft));
+            float core = exp(-d * d * mix(70.0, 38.0, bloomSoft));
+            float glow = (halo * 0.38 + core * 0.72) * edge;
             float fan = clamp(bloomHue, 0.0, 1.0);
             float slot = fract(vBand * 0.7 + vSeed * fan * 0.95 + vGain * 0.08);
             vec3 cLow = mix(color, color3, 0.4 * fan);
@@ -963,12 +988,13 @@
             themed = mix(themed, cHigh, smoothstep(0.38, 1.0, slot) * fan);
             themed = mix(color, themed, 0.22 + fan * 0.78);
             vec3 hot = mix(themed, vec3(1.0, 0.94, 0.8), bloomWarm * (0.12 + vLive * 0.22 + vBand * 0.12));
-            float twinkle = 0.72 + 0.28 * sin(time * (1.4 + vSeed * 3.2) + vSeed * 18.0);
+            float twinkle = 0.84 + 0.16 * sin(time * (1.2 + vSeed * 2.5) + vSeed * 18.0);
             float spark = mix(1.0, twinkle, bloomSpark * (0.38 + vLive * 0.35));
             float bright =
               bloomBright * (1.08 + vLive * 0.28) * spark *
               (1.0 + loudness * loudGlow * 0.92);
-            gl_FragColor = vec4(hot * bright * glow, glow * vAlpha);
+            float alpha = (halo * 0.22 + core * 0.58) * edge * vAlpha * vNearFade;
+            gl_FragColor = vec4(hot * bright * (halo * 0.32 + core * 0.9), alpha);
           }
         `,
       });
@@ -1009,6 +1035,7 @@
         ringN: new THREE.Vector3(),
         ringB: new THREE.Vector3(),
         pulse: 0,
+        pulseTarget: 0,
         yaw: 0.35,
         prevKick: 0,
         preset: -1,
@@ -1019,7 +1046,7 @@
         cameraLocked: false,
         density: 1,
       };
-      const coreGeometry = new THREE.SphereGeometry(0.64, 48, 36);
+      const coreGeometry = new THREE.SphereGeometry(MAG_CORE_RADIUS, 48, 36);
       const makeOrb = (index) => {
         const orb = new THREE.Group();
         const coreMaterial = new THREE.ShaderMaterial({
@@ -1160,6 +1187,9 @@
           phase,
           charge: baseCharge,
           chargeStrength: baseCharge,
+          bandSmooth: 0,
+          kickEnvelope: 0,
+          visualScale: orbScales[i] * 0.9,
           orbit,
           scale: orbScales[i],
           band: i / Math.max(1, MAG_ATTRACTORS - 1),
@@ -1347,7 +1377,7 @@
       );
       this.magnetosphereSpikes.frustumCulled = false;
 
-      const ringVerts = MAG_ATTRACTORS * MAG_RING_SEGS * 2;
+      const ringVerts = MAG_ATTRACTORS * MAG_RINGS_PER_ORB * MAG_RING_SEGS * 2;
       const ringGeo = new THREE.BufferGeometry();
       ringGeo.setAttribute(
         "position",
@@ -1547,7 +1577,7 @@
         this.uniforms.bass.value = this.smoothBass;
       }
       if (this.mode === "pulse" || this.mode === "bloom" || this.mode === "magnetosphere") {
-        this._updateBands();
+        this._updateBands(dt);
       }
       if (this.mode === "pulse") this._tickPulse(dt);
       if (this.mode === "ridge") this._tickRidge(dt);
@@ -1584,12 +1614,19 @@
       this._drawWaveform();
     }
 
+    _syncPulseArt() {
+      if (!this.artMesh) return;
+      this.artMesh.visible =
+        this.mode === "pulse" && this.params.pulseArt >= 0.5 && Boolean(this.artMat?.map);
+    }
+
     _tickPulse(dt) {
       const spin = 0.12 + this.smoothBass * 0.55;
       this.pulse.rotation.y += dt * spin;
       this.pulse.rotation.x = Math.sin(this.elapsed * 0.35) * 0.12;
       const s = 1 + this.kick * 0.08 + this.smoothBass * 0.05;
       this.pulse.scale.setScalar(s);
+      this._syncPulseArt();
       if (this.artMesh) {
         const targetScale =
           1 + this.smoothBass * 0.075 + this.kick * 0.12 + this.loudness * this.params.loudGlow * 0.035;
@@ -1692,22 +1729,43 @@
     _syncRidgeHalo() {
       const thick = this.params.ridgeThick ?? 0.55;
       const fuzz = this.params.ridgeFuzz ?? 0.28;
+      const t = clamp((thick - 0.15) / 1.85, 0, 1);
+      const f = clamp(fuzz, 0, 1);
       if (this.ridgeLineMat) {
-        this.ridgeLineMat.opacity = 0.55 + (1 - fuzz) * 0.45;
+        this.ridgeLineMat.opacity = 0.86 + (1 - f) * 0.14;
       }
       const halos = this.ridgeHalos || [];
-      const spread = 0.07 * thick * (0.5 + fuzz * 1.4);
-      const used = Math.min(halos.length, Math.max(2, Math.round(thick * 8 + fuzz * 4)));
+      const corePairs = t < 0.03 ? 0 : Math.max(1, Math.round(1 + t * 3));
+      const glowBudget = 8 - corePairs;
+      const glowPairs = f < 0.03 ? 0 : Math.max(1, Math.round(f * glowBudget));
+      const coreHalf = 0.006 + t * 0.26;
+      const glowHalf = coreHalf + 0.02 + f * 0.3;
+      const coreCount = corePairs * 2;
+      const glowCount = glowPairs * 2;
       for (let i = 0; i < halos.length; i++) {
         const halo = halos[i];
-        const ring = Math.floor(i / 2) + 1;
-        const sign = i % 2 === 0 ? 1 : -1;
-        const on = i < used;
+        const isGlow = i >= coreCount;
+        const local = isGlow ? i - coreCount : i;
+        const ring = (local >> 1) + 1;
+        const sign = local & 1 ? -1 : 1;
+        const on = isGlow ? local < glowCount : local < coreCount;
         halo.visible = on;
-        halo.position.y = sign * spread * ring;
-        halo.material.opacity = on
-          ? (0.42 / Math.sqrt(ring)) * (0.35 + thick * 0.4) * (0.45 + fuzz * 0.55)
-          : 0;
+        if (!on) {
+          halo.material.opacity = 0;
+          halo.position.set(0, 0, 0);
+          continue;
+        }
+        if (isGlow) {
+          const u = ring / glowPairs;
+          halo.position.set(0, sign * (coreHalf + u * (glowHalf - coreHalf)), 0.012 * ring);
+          halo.material.opacity = 0.18 * f * Math.exp(-u * u * 2.6);
+          halo.material.color.setRGB(0.72, 0.8, 0.96);
+        } else {
+          const u = ring / corePairs;
+          halo.position.set(0, sign * coreHalf * u, 0);
+          halo.material.opacity = (0.38 - u * 0.1) * (0.5 + t * 0.5);
+          halo.material.color.setRGB(1, 1, 1);
+        }
       }
     }
 
@@ -1720,7 +1778,13 @@
       mag.simulationTime += simStep;
       const simT = mag.simulationTime;
       const kickRise = Math.max(0, this.kick - mag.prevKick);
-      mag.pulse = Math.max(kickRise * 2.4, mag.pulse * Math.exp(-step * 4.8));
+      mag.pulseTarget = Math.max(
+        kickRise * 2.4,
+        mag.pulseTarget * Math.exp(-step * 9.5)
+      );
+      const pulseRate = mag.pulseTarget > mag.pulse ? 28 : 7;
+      mag.pulse +=
+        (mag.pulseTarget - mag.pulse) * (1 - Math.exp(-step * pulseRate));
       mag.prevKick = this.kick;
       const reflectionWave = Math.pow(
         0.5 + 0.5 * Math.sin(t * 0.09 + Math.sin(t * 0.031) * 1.7),
@@ -1784,6 +1848,10 @@
       }
 
       for (let i = 0; i < mag.orbs.length; i++) {
+        mag.orbs[i].mesh.visible = magOrbShown(preset, i);
+      }
+
+      for (let i = 0; i < mag.orbs.length; i++) {
         const orb = mag.orbs[i];
         orb.prev.copy(orb.p);
         const a = orb.phase + simT * (0.075 + i * 0.009);
@@ -1801,7 +1869,15 @@
             mag.center.z + Math.sin(a) * orb.orbit * (0.46 + i * 0.065)
           );
         }
-        const band = this._bandMag(orb.band);
+        const bandTarget = this._bandMag(orb.band);
+        const bandRate = bandTarget > orb.bandSmooth ? 22 : 6.5;
+        orb.bandSmooth +=
+          (bandTarget - orb.bandSmooth) * (1 - Math.exp(-step * bandRate));
+        const band = orb.bandSmooth;
+        orb.kickEnvelope = Math.max(
+          kickRise,
+          orb.kickEnvelope * Math.exp(-step * 11)
+        );
         const targetCharge = orb.charge * (0.68 + band * 0.78 + mag.pulse * 0.24);
         orb.chargeStrength += (targetCharge - orb.chargeStrength) * (1 - Math.exp(-step * 2.2));
         if (simStep > 0) {
@@ -1809,18 +1885,28 @@
           let ax = (orb.target.x - orb.p.x) * spring;
           let ay = (orb.target.y - orb.p.y) * spring;
           let az = (orb.target.z - orb.p.z) * spring;
+          const ra = MAG_CORE_RADIUS * orb.visualScale;
           for (let j = 0; j < mag.orbs.length; j++) {
             if (j === i) continue;
             const other = mag.orbs[j];
+            if (!orb.mesh.visible || !other.mesh.visible) continue;
             const dx = orb.p.x - other.p.x;
             const dy = orb.p.y - other.p.y;
             const dz = orb.p.z - other.p.z;
-            const d2 = dx * dx + dy * dy + dz * dz + 0.3;
-            const inv = 1 / Math.sqrt(d2);
-            const repel = 0.17 / d2;
-            ax += dx * inv * repel;
-            ay += dy * inv * repel;
-            az += dz * inv * repel;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < 1e-8) {
+              ax += 0.4;
+              continue;
+            }
+            const d = Math.sqrt(d2);
+            const minD = ra + MAG_CORE_RADIUS * other.visualScale + 0.12;
+            const reach = minD * 2.1;
+            if (d >= reach) continue;
+            const falloff = 1 - d / reach;
+            const repel = (2.4 * falloff * falloff) / Math.max(d, 0.08);
+            ax += (dx / d) * repel;
+            ay += (dy / d) * repel;
+            az += (dz / d) * repel;
           }
           ax += Math.sin(simT * 0.31 + orb.phase) * band * 0.15;
           ay += Math.cos(simT * 0.27 + orb.phase) * band * 0.12;
@@ -1828,23 +1914,28 @@
           orb.v.x += ax * simStep;
           orb.v.y += ay * simStep;
           orb.v.z += az * simStep;
-          if (kickRise > 0.035) {
-            orb.v.addScaledVector(orb.axis, kickRise * (0.65 + i * 0.08) * (i % 2 ? -1 : 1));
+          if (orb.kickEnvelope > 0.01) {
+            orb.v.addScaledVector(
+              orb.axis,
+              orb.kickEnvelope * (3.4 + i * 0.35) * simStep * (i % 2 ? -1 : 1)
+            );
           }
-          orb.v.multiplyScalar(Math.exp(-simStep * 0.64));
-          if (orb.v.lengthSq() > 2.56) orb.v.setLength(1.6);
+          orb.v.multiplyScalar(Math.exp(-simStep * 0.72));
+          if (orb.v.lengthSq() > 1.69) orb.v.setLength(1.3);
           orb.p.addScaledVector(orb.v, simStep);
         }
-        const scale =
+        const scaleTarget =
           orb.scale * this.params.magCoreSize * (0.9 + band * 0.24 + mag.pulse * 0.11);
-        orb.mesh.position.copy(orb.p);
-        orb.mesh.scale.setScalar(scale);
-        if (preset === 0) orb.mesh.visible = i < 3;
-        else if (preset === 1) orb.mesh.visible = true;
-        else if (preset === 2) orb.mesh.visible = false;
-        else orb.mesh.visible = i < 2;
+        const scaleRate = scaleTarget > orb.visualScale ? 20 : 7.5;
+        orb.visualScale +=
+          (scaleTarget - orb.visualScale) * (1 - Math.exp(-step * scaleRate));
+        orb.mesh.scale.setScalar(orb.visualScale);
         orb.mesh.rotation.y += step * (0.08 + i * 0.025);
         orb.mesh.rotation.x = Math.sin(t * 0.09 + orb.phase) * 0.18;
+      }
+      if (simStep > 0) this._separateMagOrbs();
+      for (let i = 0; i < mag.orbs.length; i++) {
+        mag.orbs[i].mesh.position.copy(mag.orbs[i].p);
       }
 
       this.magnetosphereMid.lerp(mag.center, 1 - Math.exp(-step * 1.7));
@@ -1859,39 +1950,131 @@
       this.magnetosphereAtmo.rotation.z = Math.sin(t * 0.012) * 0.1;
     }
 
-    _updateMagRings() {
-      if (!this.magRingPos || !this.mag) return;
+    _separateMagOrbs() {
+      const orbs = this.mag?.orbs;
+      if (!orbs) return;
+      for (let i = 0; i < orbs.length; i++) {
+        const a = orbs[i];
+        if (!a.mesh.visible) continue;
+        const ra = MAG_CORE_RADIUS * a.visualScale;
+        for (let j = i + 1; j < orbs.length; j++) {
+          const b = orbs[j];
+          if (!b.mesh.visible) continue;
+          const rb = MAG_CORE_RADIUS * b.visualScale;
+          let dx = a.p.x - b.p.x;
+          let dy = a.p.y - b.p.y;
+          let dz = a.p.z - b.p.z;
+          let d2 = dx * dx + dy * dy + dz * dz;
+          const minD = ra + rb + 0.1;
+          if (d2 < 1e-8) {
+            dx = 0.04;
+            dy = 0;
+            dz = 0;
+            d2 = dx * dx;
+          }
+          if (d2 >= minD * minD) continue;
+          const d = Math.sqrt(d2);
+          const nx = dx / d;
+          const ny = dy / d;
+          const nz = dz / d;
+          const overlap = minD - d;
+          const wa = rb / Math.max(ra + rb, 0.001);
+          const wb = 1 - wa;
+          a.p.x += nx * overlap * wa;
+          a.p.y += ny * overlap * wa;
+          a.p.z += nz * overlap * wa;
+          b.p.x -= nx * overlap * wb;
+          b.p.y -= ny * overlap * wb;
+          b.p.z -= nz * overlap * wb;
+          const vn = (a.v.x - b.v.x) * nx + (a.v.y - b.v.y) * ny + (a.v.z - b.v.z) * nz;
+          if (vn >= 0) continue;
+          const impulse = -(1.45) * vn;
+          a.v.x += nx * impulse * wa;
+          a.v.y += ny * impulse * wa;
+          a.v.z += nz * impulse * wa;
+          b.v.x -= nx * impulse * wb;
+          b.v.y -= ny * impulse * wb;
+          b.v.z -= nz * impulse * wb;
+        }
+      }
+    }
+
+    _writeMagRing(orb, axis, radius, spin, tint, vertex, alphaValue) {
+      const mag = this.mag;
+      mag.tmp.set(0, 1, 0);
+      mag.ringN.crossVectors(axis, mag.tmp);
+      if (mag.ringN.lengthSq() < 0.001) {
+        mag.tmp.set(1, 0, 0);
+        mag.ringN.crossVectors(axis, mag.tmp);
+      }
+      mag.ringN.normalize();
+      mag.ringB.crossVectors(axis, mag.ringN).normalize();
       const pos = this.magRingPos.array;
       const col = this.magRingCol.array;
       const alpha = this.magRingAlpha.array;
-      const mag = this.mag;
-      let vertex = 0;
-      for (let i = 0; i < mag.orbs.length; i++) {
-        const orb = mag.orbs[i];
-        mag.ringN.crossVectors(orb.axis, mag.axis.set(0, 1, 0));
-        if (mag.ringN.lengthSq() < 0.001) mag.ringN.set(1, 0, 0);
-        mag.ringN.normalize();
-        mag.ringB.crossVectors(orb.axis, mag.ringN).normalize();
-        const tint = mag.palette[i % 3];
-        const radius = orb.scale * this.params.magCoreSize * (0.9 + (i % 2) * 0.45);
-        for (let s = 0; s < MAG_RING_SEGS; s++) {
-          for (let end = 0; end < 2; end++) {
-            const u = (s + end) / MAG_RING_SEGS;
-            const angle = u * Math.PI * 2 + this.elapsed * (0.035 + i * 0.008);
-            const ca = Math.cos(angle);
-            const sa = Math.sin(angle) * (0.52 + i * 0.04);
-            const o = vertex * 3;
-            pos[o] = orb.p.x + (mag.ringN.x * ca + mag.ringB.x * sa) * radius;
-            pos[o + 1] = orb.p.y + (mag.ringN.y * ca + mag.ringB.y * sa) * radius;
-            pos[o + 2] = orb.p.z + (mag.ringN.z * ca + mag.ringB.z * sa) * radius;
-            col[o] = tint.r;
-            col[o + 1] = tint.g;
-            col[o + 2] = tint.b;
-            alpha[vertex] = 0.06 + this.energy * 0.08;
-            vertex++;
-          }
+      for (let s = 0; s < MAG_RING_SEGS; s++) {
+        for (let end = 0; end < 2; end++) {
+          const u = (s + end) / MAG_RING_SEGS;
+          const angle = u * Math.PI * 2 + spin;
+          const ca = Math.cos(angle);
+          const sa = Math.sin(angle);
+          const o = vertex * 3;
+          pos[o] = orb.p.x + (mag.ringN.x * ca + mag.ringB.x * sa) * radius;
+          pos[o + 1] = orb.p.y + (mag.ringN.y * ca + mag.ringB.y * sa) * radius;
+          pos[o + 2] = orb.p.z + (mag.ringN.z * ca + mag.ringB.z * sa) * radius;
+          col[o] = tint.r;
+          col[o + 1] = tint.g;
+          col[o + 2] = tint.b;
+          alpha[vertex] = alphaValue;
+          vertex++;
         }
       }
+      return vertex;
+    }
+
+    _updateMagRings() {
+      if (!this.magRingPos || !this.mag) return;
+      const mag = this.mag;
+      const pos = this.magRingPos.array;
+      const alpha = this.magRingAlpha.array;
+      let vertex = 0;
+      const glow = 0.11 + this.energy * 0.1;
+      for (let i = 0; i < mag.orbs.length; i++) {
+        const orb = mag.orbs[i];
+        if (!orb.mesh.visible) continue;
+        const tint = mag.palette[i % 3];
+        const coreR = MAG_CORE_RADIUS * orb.visualScale;
+        const spin = this.elapsed * (0.22 + i * 0.05);
+        mag.axis.copy(orb.axis);
+        if (mag.axis.lengthSq() < 1e-6) mag.axis.set(0, 1, 0);
+        mag.axis.normalize();
+        const yaw = this.elapsed * (0.13 + i * 0.03);
+        const cy = Math.cos(yaw);
+        const sy = Math.sin(yaw);
+        const ax = mag.axis.x;
+        const az = mag.axis.z;
+        mag.axis.set(ax * cy - az * sy, mag.axis.y, ax * sy + az * cy).normalize();
+        vertex = this._writeMagRing(orb, mag.axis, coreR * 1.22, spin, tint, vertex, glow);
+        mag.tmp.set(1, 0, 0);
+        if (Math.abs(mag.axis.dot(mag.tmp)) > 0.92) mag.tmp.set(0, 0, 1);
+        mag.radial.copy(mag.axis).addScaledVector(mag.tmp, 0.62).normalize();
+        vertex = this._writeMagRing(
+          orb,
+          mag.radial,
+          coreR * 1.48,
+          -spin * 0.7,
+          tint,
+          vertex,
+          glow * 0.72
+        );
+      }
+      for (let v = vertex; v < pos.length / 3; v++) {
+        pos[v * 3] = 0;
+        pos[v * 3 + 1] = 0;
+        pos[v * 3 + 2] = 0;
+        alpha[v] = 0;
+      }
+      this.magnetosphereRings.geometry.setDrawRange(0, vertex);
       this.magRingPos.needsUpdate = true;
       this.magRingCol.needsUpdate = true;
       this.magRingAlpha.needsUpdate = true;
@@ -2331,8 +2514,18 @@
       const react = Math.min(1.12, s);
       const drift = (speed, amt, phase) => Math.sin(t * speed + phase) * amt;
       const u = this.uniforms;
+      const danceTarget = clamp(
+        (this.rawSmoothBass * 0.52 + this.kick * 0.62 + this.energy * 0.18) * react,
+        0,
+        1.2
+      );
+      if (!Number.isFinite(this.bloomDance)) this.bloomDance = 0;
+      const danceRate = danceTarget > this.bloomDance ? 24 : 7.5;
+      this.bloomDance +=
+        (danceTarget - this.bloomDance) * (1 - Math.exp(-Math.max(0, dt) * danceRate));
       if (u) {
         if (u.bloomReact) u.bloomReact.value = react;
+        if (u.bloomDance) u.bloomDance.value = this.bloomDance;
         if (u.bloomShape) {
           u.bloomShape.value = clamp(
             p.bloomShape + drift(0.041, 0.07, 0.3) + drift(0.017, 0.035, 1.7),
@@ -2346,10 +2539,19 @@
         if (u.bloomSpark) u.bloomSpark.value = clamp(p.bloomSpark + drift(0.049, 0.045, 1.2), 0, 1);
         if (u.bloomSize) u.bloomSize.value = p.bloomSize * (1 + drift(0.019, 0.04, 0.6));
         if (u.bloomSpread) u.bloomSpread.value = clamp(p.bloomSpread * (1 + drift(0.023, 0.05, 2.4)), 0, 1.6);
-        if (u.bloomBright) u.bloomBright.value = clamp(p.bloomBright * (1 + drift(0.015, 0.025, 1.1)), 0.58, 1.12);
+        if (u.bloomBright) u.bloomBright.value = clamp(
+          p.bloomBright * (1 + drift(0.015, 0.025, 1.1)),
+          0.58,
+          0.85
+        );
         if (u.bloomTight) u.bloomTight.value = clamp(p.bloomTight + drift(0.014, 0.035, 0.9), 0, 1);
       }
-      const spin = (p.bloomSpin ?? 1) * (1 + drift(0.012, 0.05, 0.5));
+      const spinFlow = clamp(
+        0.84 + drift(0.041, 0.2, 0.5) + drift(0.013, 0.09, 2.1) + drift(0.083, 0.055, 1.4),
+        0.48,
+        1.18
+      );
+      const spin = (p.bloomSpin ?? 1) * spinFlow;
       this.bloomReact = react;
       this.bloom.rotation.y += dt * (0.09 + this.rawSmoothBass * 0.18 * react) * spin;
       this.bloom.rotation.x =
@@ -2361,17 +2563,24 @@
         Math.sin(t * 0.037 + 1.1) * 0.34,
         Math.sin(t * 0.021 + 2.3) * 0.2
       );
-      this.bloom.scale.setScalar(1 + this.kick * 0.04 * react);
+      this.bloom.scale.setScalar(1 + this.bloomDance * 0.035);
     }
 
-    _updateBands() {
+    _updateBands(dt = 1 / 60) {
       const bins = 32;
       const data = this.bandData;
       if (!data) return;
+      const step = dt > 0 ? Math.min(dt, 0.05) : 1 / 60;
       for (let i = 0; i < bins; i++) {
         const mag = this._bandMag(i / (bins - 1));
-        const v = Math.min(255, mag * 255);
         const o = i * 4;
+        const target = Math.min(1, mag);
+        const current = data[o] / 255;
+        const rate = target > current ? 28 : 9;
+        const smooth = this.mode === "bloom"
+          ? current + (target - current) * (1 - Math.exp(-step * rate))
+          : target;
+        const v = Math.min(255, smooth * 255);
         data[o] = v;
         data[o + 1] = v;
         data[o + 2] = v;
@@ -2402,21 +2611,22 @@
         ];
       }
       const bloomReact = this.bloomReact ?? Math.min(1.12, this.params.sensitivity ?? 1);
-      const bloomFlight = this.elapsed * 0.085 + 0.65;
-      const bloomThrough = Math.pow(Math.abs(Math.sin(bloomFlight)), 6);
+      const bloomFlight = this.elapsed * 0.078 + 0.25;
+      const bloomSide = Math.tanh(Math.cos(bloomFlight) * 5) / Math.tanh(5);
+      const bloomThrough = Math.pow(1 - Math.min(1, Math.abs(bloomSide)), 0.72);
       const targetFov = this.mode === "magnetosphere"
         ? [58, 52, 62, 66][Math.max(0, this.mag?.preset || 0)]
-        : this.mode === "bloom" ? 64 + bloomThrough * 10 : 60;
+        : this.mode === "bloom" ? 63 + bloomThrough * 10 : 60;
       const nextFov = this.camera.fov + (targetFov - this.camera.fov) * Math.min(1, dt * 0.7);
       if (Math.abs(nextFov - this.camera.fov) > 0.001) {
         this.camera.fov = nextFov;
         this.camera.updateProjectionMatrix();
       }
-      const bloomRadius = 1.85 + Math.cos(bloomFlight * 2) * 0.55;
+      const bloomRadius = 2.65 + Math.cos(bloomFlight * 2) * 0.45;
       const bloomCam = [
-        Math.sin(bloomFlight) * bloomRadius,
-        0.4 + Math.sin(bloomFlight * 1.7 + 0.4) * 1.9 + Math.sin(bloomFlight * 3) * 0.28,
-        2 + Math.cos(bloomFlight) * 6.4 - this.kick * 0.12 * bloomReact,
+        Math.sin(bloomFlight) * bloomRadius + Math.sin(bloomFlight * 3) * 0.3,
+        0.55 + Math.sin(bloomFlight * 1.7 + 0.4) * 1.55 + Math.sin(bloomFlight * 4) * 0.24,
+        bloomSide * 9.6 + Math.cos(bloomFlight * 2) * 0.4 - (this.bloomDance || 0) * 0.08,
       ];
       const bases = {
         pulse: [0, 0.35, 7.2],

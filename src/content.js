@@ -52,6 +52,7 @@
       ridgeThick: 0.55,
       ridgeFreq: 1,
       ridgeFuzz: 0.28,
+      pulseArt: 1,
       sensitivity: 1,
       loudGlow: 0.85,
       magReflect: 0.04,
@@ -99,7 +100,19 @@
   }
 
   function isInvalidated(err) {
-    return /Extension context invalidated/i.test(String(err?.message || err));
+    const msg = String(err?.message || err);
+    return /Extension context invalidated/i.test(msg) || /specified extension context/i.test(msg);
+  }
+
+  function isBenignCaptureError(err) {
+    const msg = String(err?.message || err);
+    return (
+      isInvalidated(err) ||
+      /not been invoked/i.test(msg) ||
+      /activeTab/i.test(msg) ||
+      /cannot be captured/i.test(msg) ||
+      /no stream id/i.test(msg)
+    );
   }
 
   function shutdown() {
@@ -248,7 +261,7 @@
     btn.className = `${PLAYBAR_BTN_CLASS} sc-button sc-button-secondary sc-button-small sc-button-icon`;
     btn.title = "Visualizer";
     btn.setAttribute("aria-label", "Toggle visualizer");
-    btn.appendChild(h("div", {}, vizIcon(16)));
+    btn.appendChild(vizIcon(16));
     btn.addEventListener(
       "click",
       guard((event) => {
@@ -281,7 +294,7 @@
         }
       }
     };
-    tick();
+    guard(tick)();
     trackTimer = setInterval(guard(tick), 500);
     const badge = document.querySelector(".playbackSoundBadge");
     if (badge) {
@@ -295,9 +308,21 @@
   }
 
   function readTrack() {
-    const titleLink = document.querySelector(".playbackSoundBadge__titleLink");
-    const artistLink = document.querySelector(".playbackSoundBadge__lightLink");
-    const art = document.querySelector(".playbackSoundBadge__avatar .image__full");
+    if (!alive()) return false;
+    let titleLink;
+    let artistLink;
+    let art;
+    try {
+      titleLink = document.querySelector(".playbackSoundBadge__titleLink");
+      artistLink = document.querySelector(".playbackSoundBadge__lightLink");
+      art = document.querySelector(".playbackSoundBadge__avatar .image__full");
+    } catch (err) {
+      if (isInvalidated(err)) {
+        shutdown();
+        return false;
+      }
+      throw err;
+    }
     const title = (
       titleLink?.getAttribute("title") ||
       titleLink?.textContent ||
@@ -395,7 +420,7 @@
     try {
       ensureOverlay();
     } catch (err) {
-      console.error("SCViz overlay failed", err);
+      console.error("Soundstage overlay failed", err);
       state.on = false;
       setPageAudioActive(false);
       document.documentElement.classList.remove("scviz-on");
@@ -499,7 +524,8 @@
           h("div", { class: "scviz-tray-panel" }, [
             paramSlider("sensitivity", "Sensitivity", 0, 2.2, 0.05, "all"),
             paramSlider("loudGlow", "Loud glow", 0, 2, 0.05, "all"),
-            paramSlider("bloomBright", "Bright", 0.58, 1, 0.01, "bloom"),
+            paramToggle("pulseArt", "Cover art", "pulse"),
+            paramSlider("bloomBright", "Bright", 0.58, 0.85, 0.01, "bloom"),
             paramSlider("bloomSize", "Size", 0.4, 2.2, 0.05, "bloom"),
             paramSlider("bloomSpread", "Spread", 0, 1.6, 0.05, "bloom"),
             paramSlider("bloomSpin", "Spin", 0, 2.5, 0.05, "bloom"),
@@ -596,6 +622,26 @@
     const current = MODES().find((m) => m.id === state.mode) || MODES()[0];
     setChip(modeBtn, vizIcon(14), current.label);
     modeBtn.title = "Cycle visualizer (V)";
+    lockModeChipWidth();
+  }
+
+  function lockModeChipWidth() {
+    if (!modeBtn || modeBtn.dataset.widthLocked) return;
+    const probe = document.createElement("button");
+    probe.className = "scviz-chip";
+    probe.style.cssText =
+      'position:fixed;left:-9999px;top:0;visibility:hidden;width:auto;min-width:0;font:600 13px Interstate,"Lucida Grande","Lucida Sans Unicode","Lucida Sans",Garuda,Verdana,Tahoma,sans-serif;letter-spacing:0.01em';
+    document.documentElement.appendChild(probe);
+    let max = 0;
+    for (const mode of MODES()) {
+      setChip(probe, vizIcon(14), mode.label);
+      max = Math.max(max, probe.offsetWidth);
+    }
+    probe.remove();
+    if (max > 0) {
+      modeBtn.style.minWidth = `${Math.ceil(max)}px`;
+      modeBtn.dataset.widthLocked = "1";
+    }
   }
 
   function toggleTray() {
@@ -662,13 +708,37 @@
     ]);
   }
 
+  function paramToggle(key, label, group) {
+    const on = Number(state.params[key]) >= 0.5;
+    const input = h("input", { type: "checkbox" });
+    input.dataset.param = key;
+    input.checked = on;
+    const read = h("em", { class: "scviz-tray-val", text: on ? "On" : "Off" });
+    input.addEventListener(
+      "change",
+      guard(() => {
+        const v = input.checked ? 1 : 0;
+        state.params[key] = v;
+        state.params = clampParams(state.params);
+        read.textContent = state.params[key] >= 0.5 ? "On" : "Off";
+        state.viz?.setParams({ [key]: state.params[key] });
+        persistParams();
+      })
+    );
+    return h("label", { class: "scviz-tray-item scviz-tray-toggle", "data-for": group || "all" }, [
+      h("span", { text: label }),
+      input,
+      read,
+    ]);
+  }
+
   function formatParam(v) {
     const n = Number(v);
     return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
   }
 
   const PARAM_LIMITS = {
-    bloomBright: [0.58, 1, 0.72],
+    bloomBright: [0.58, 0.85, 0.72],
     bloomSize: [0.4, 2.2, 1],
     bloomSpread: [0, 1.6, 0.55],
     bloomSpin: [0, 2.5, 1],
@@ -683,6 +753,7 @@
     ridgeThick: [0.15, 2, 0.55],
     ridgeFreq: [0.2, 1, 1],
     ridgeFuzz: [0, 1, 0.28],
+    pulseArt: [0, 1, 1],
     sensitivity: [0, 2.2, 1],
     loudGlow: [0, 2, 0.85],
     magReflect: [0, 1, 0.04],
@@ -723,8 +794,13 @@
     root.querySelectorAll(".scviz-tray-item input[data-param]").forEach((input) => {
       const key = input.dataset.param;
       if (!(key in state.params)) return;
-      input.value = String(state.params[key]);
       const read = input.parentElement?.querySelector(".scviz-tray-val");
+      if (input.type === "checkbox") {
+        input.checked = Number(state.params[key]) >= 0.5;
+        if (read) read.textContent = input.checked ? "On" : "Off";
+        return;
+      }
+      input.value = String(state.params[key]);
       if (read) read.textContent = formatParam(state.params[key]);
     });
   }
@@ -794,7 +870,6 @@
     if (waveBtn) {
       setChip(waveBtn, waveIcon(), state.waveOn ? "Waveform" : "Waveform off");
     }
-    if (state.on) state.viz?.resize();
     wakeChrome();
   }
 
@@ -1240,7 +1315,7 @@
       await startTabCapture();
     } catch (err) {
       if (isInvalidated(err)) shutdown();
-      else console.warn("SCViz: tab capture failed", err);
+      else if (!isBenignCaptureError(err)) console.warn("Soundstage: tab capture failed", err);
     }
   }
 
@@ -1485,7 +1560,7 @@
   }
 
   function h(tag, attrs, children) {
-    const svg = tag === "svg" || tag === "path";
+    const svg = tag === "svg" || tag === "path" || tag === "rect" || tag === "g";
     const el = svg
       ? document.createElementNS("http://www.w3.org/2000/svg", tag)
       : document.createElement(tag);
@@ -1522,7 +1597,7 @@
     return h("svg", { viewBox: "0 0 16 16", width: String(size), height: String(size), "aria-hidden": "true" }, [
       h("path", {
         fill: "currentColor",
-        d: "M1 9h2v4H1V9zm4-4h2v8H5V5zm4-3h2v11H9V2zm4 5h2v6h-2V7z",
+        d: "M1 10h2v6H1V10zm4-5h2v11H5V5zm4-3h2v14H9V2zm4 5h2v9h-2V7z",
       }),
     ]);
   }

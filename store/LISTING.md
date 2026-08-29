@@ -10,7 +10,7 @@ This extension is **not affiliated with SoundCloud**. Do not upload the SoundClo
 **Name** (max 45 characters)
 
 ```
-SCViz – SoundCloud visualizer
+Soundstage – SoundCloud visualizer
 ```
 
 **Summary** (max 132 characters)
@@ -26,13 +26,13 @@ Full-screen playing mode for SoundCloud: Pulse, Ridge, Bloom, and Magnetosphere 
 **Homepage URL** (after the GitHub repo is public)
 
 ```
-https://github.com/r-medina/scviz
+https://github.com/r-medina/soundstage
 ```
 
 **Support URL**
 
 ```
-https://github.com/r-medina/scviz/issues
+https://github.com/r-medina/soundstage/issues
 ```
 
 **Official URL:** leave empty unless you verify a site in Search Console.
@@ -40,7 +40,7 @@ https://github.com/r-medina/scviz/issues
 ## Detailed description
 
 ```
-SCViz turns SoundCloud into a playing mode. While a track is playing, open it from the player bar. The page becomes a full-screen visualizer. The SoundCloud play bar stays. The waveform stays at the bottom, with a live oscilloscope over it.
+Soundstage turns SoundCloud into a playing mode. While a track is playing, open it from the player bar. The page becomes a full-screen visualizer. The SoundCloud play bar stays. The waveform stays at the bottom, with a live oscilloscope over it.
 
 Four visualizers
 
@@ -57,7 +57,7 @@ Timed comments can sit on the waveform, pop as bubbles, and list on the right. T
 
 Audio
 
-SCViz reads audio in the tab so the visuals can follow the music. Capture stays in the browser. Nothing is uploaded.
+Soundstage reads audio in the tab so the visuals can follow the music. Capture stays in the browser. Nothing is uploaded.
 
 Privacy
 
@@ -73,19 +73,21 @@ This project is unofficial and is not affiliated with, endorsed, or sponsored by
 | Store icon | `icons/icon128.png` | 128×128 |
 | Small promo tile (**required**) | `store/promo/small-tile.png` | 440×280 |
 | Marquee promo tile (optional) | `store/promo/marquee.png` | 1400×560 |
-| Screenshot 1 | `store/screenshots/01-pulse.png` | 1280×800 |
-| Screenshot 2 | `store/screenshots/02-ridge.png` | 1280×800 |
-| Screenshot 3 | `store/screenshots/03-bloom.png` | 1280×800 |
-| Screenshot 4 | `store/screenshots/04-magnetosphere.png` | 1280×800 |
+| Screenshot 1 | `store/screenshots/01-magnetosphere.png` | 1280×800 |
+| Screenshot 2 | `store/screenshots/02-magnetosphere-close.png` | 1280×800 |
+| Screenshot 3 | `store/screenshots/03-ridge.png` | 1280×800 |
+| Screenshot 4 | `store/screenshots/04-bloom.png` | 1280×800 |
+| Screenshot 5 | `store/screenshots/05-bloom-close.png` | 1280×800 |
 
 Screenshot captions (optional, in dashboard order):
 
-1. Pulse — wireframe orb  
-2. Ridge — receding spectrum  
-3. Bloom — particle nebula  
-4. Magnetosphere — charged cores and trails  
+1. Magnetosphere on SoundCloud — HUD, title, and play bar  
+2. Magnetosphere — charged cores and trails  
+3. Ridge — receding spectrum  
+4. Bloom — particle nebula  
+5. Bloom — close-up  
 
-The four stills are lab captures of the visualizers. Reviewers prefer at least one shot of the **extension on soundcloud.com** (play bar button + overlay). Take that on your machine after loading unpacked, then replace or add it as screenshot 5.
+These are real captures on soundcloud.com. Screenshot 1 is the in-context shot reviewers want (overlay + play bar). Chrome Web Store allows at most five.
 
 **YouTube video:** recommended. Record 20–40s of playing mode on a real track. Shorts-style is fine.
 
@@ -133,7 +135,7 @@ All scripts ship in the extension package (`src/vendor/three.min.js` included).
 
 Check **none** of the collection categories if the form allows “I do not collect user data,” **or** if you must pick something closest to local-only:
 
-- Do **not** check personally identifiable information, health, financial, authentication, location, web history, user activity, website content — SCViz does not collect these for the developer.
+- Do **not** check personally identifiable information, health, financial, authentication, location, web history, user activity, website content — Soundstage does not collect these for the developer.
 - Local preferences and in-tab audio analysis are not sent off-device.
 
 Certify limited use / no sale of data / no use for unrelated purposes. All true.
@@ -143,7 +145,7 @@ Certify limited use / no sale of data / no use for unrelated purposes. All true.
 After the repo is public:
 
 ```
-https://github.com/r-medina/scviz/blob/main/PRIVACY.md
+https://github.com/r-medina/soundstage/blob/main/PRIVACY.md
 ```
 
 Google needs this URL to load without auth. `blob/main/PRIVACY.md` on a public repo is enough. A GitHub Pages copy is optional.

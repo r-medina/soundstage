@@ -40,16 +40,36 @@ html.scviz-hide-sc-comments .commentPlaceholder {
 }
 
 .scviz-playbar-btn {
-  width: 24px;
-  height: 24px;
-  margin-right: 8px;
+  /* Match .sc-button-small.sc-button-icon (20×22). A 24px box sat below the others. */
+  width: 20px !important;
+  min-width: 20px !important;
+  height: 22px !important;
+  margin: 0 5px 0 0;
+  padding: 0 !important;
+  line-height: 0 !important;
+  font-size: 0 !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  vertical-align: top;
+  box-sizing: border-box;
   color: inherit;
+}
+
+.scviz-playbar-btn::before,
+.scviz-playbar-btn::after {
+  content: none !important;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
 }
 
 .scviz-playbar-btn svg {
   width: 16px;
   height: 16px;
   display: block;
+  flex: none;
 }
 
 .scviz-playbar-btn.is-on,
@@ -60,6 +80,7 @@ html.scviz-hide-sc-comments .commentPlaceholder {
 
 #scviz-root {
   --scviz-iris: 100%;
+  --scviz-wave: 168px;
   position: fixed;
   top: 0;
   left: 0;
@@ -350,6 +371,10 @@ html.scviz-on #scviz-root {
   transition: opacity 0.7s ease;
 }
 
+html.scviz-on:not(.scviz-wave-off) .scviz-meta {
+  bottom: calc(var(--scviz-wave, 168px) + 16px);
+}
+
 .scviz-title {
   font-size: clamp(20px, 3.2vw, 36px);
   font-weight: 700;
@@ -412,6 +437,14 @@ html.scviz-on #scviz-root {
   align-items: center;
   gap: 8px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+#scviz-mode {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  min-width: 13.5em;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 .scviz-chip:hover {
@@ -500,8 +533,52 @@ html.scviz-on #scviz-root {
 
 #scviz-root.scviz-mode-bloom .scviz-tray-item[data-for="bloom"],
 #scviz-root.scviz-mode-ridge .scviz-tray-item[data-for="ridge"],
-#scviz-root.scviz-mode-magnetosphere .scviz-tray-item[data-for="magnetosphere"] {
+#scviz-root.scviz-mode-magnetosphere .scviz-tray-item[data-for="magnetosphere"],
+#scviz-root.scviz-mode-pulse .scviz-tray-item[data-for="pulse"] {
   display: flex;
+}
+
+.scviz-tray-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.scviz-tray-toggle span {
+  flex: 1;
+}
+
+.scviz-tray-item input[type="checkbox"] {
+  appearance: none;
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  flex: none;
+  position: relative;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+
+.scviz-tray-item input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+
+.scviz-tray-item input[type="checkbox"]:checked {
+  background: #ff5500;
+}
+
+.scviz-tray-item input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
 }
 
 .scviz-tray-item input[type="range"] {
@@ -525,6 +602,10 @@ html.scviz-on #scviz-root {
   height: 0;
   pointer-events: none;
   z-index: 3;
+}
+
+html.scviz-on:not(.scviz-wave-off) .scviz-toasts {
+  bottom: calc(var(--scviz-wave, 168px) + 18px);
 }
 
 .scviz-toast {
@@ -589,9 +670,12 @@ html.scviz-on #scviz-root {
 }
 
 .scviz-wave {
-  position: relative;
-  height: 168px;
-  flex: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  height: var(--scviz-wave, 168px);
   background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.5));
   cursor: pointer;
 }
@@ -654,13 +738,17 @@ html.scviz-comments-off .scviz-rail {
     height: min(42vw, 180px);
   }
 
-  .scviz-wave {
-    height: 120px;
+  #scviz-root {
+    --scviz-wave: 120px;
   }
 
   .scviz-rail {
     display: none;
   }
+}
+
+html.scviz-on:not(.scviz-wave-off) .scviz-rail {
+  bottom: calc(var(--scviz-wave, 168px) + 16px);
 }
 
 .scviz-rail {

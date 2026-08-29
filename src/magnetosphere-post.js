@@ -93,12 +93,54 @@
         `,
       });
 
+      this.auraMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          inputTex: { value: null },
+          texelSize: { value: new THREE.Vector2(1, 1) },
+          radius: { value: 4.4 },
+        },
+        depthTest: false,
+        depthWrite: false,
+        vertexShader: FULLSCREEN_VERTEX,
+        fragmentShader: `
+          uniform sampler2D inputTex;
+          uniform vec2 texelSize;
+          uniform float radius;
+          varying vec2 vUv;
+          void main() {
+            vec2 px = texelSize * radius;
+            vec2 d1 = px * 1.4;
+            vec2 q1 = px * 1.15;
+            vec2 d2 = px * 3.6;
+            vec2 q2 = px * 3.0;
+            vec3 color = texture2D(inputTex, vUv).rgb * 0.16;
+            color += texture2D(inputTex, vUv + vec2(d1.x, 0.0)).rgb * 0.085;
+            color += texture2D(inputTex, vUv - vec2(d1.x, 0.0)).rgb * 0.085;
+            color += texture2D(inputTex, vUv + vec2(0.0, d1.y)).rgb * 0.085;
+            color += texture2D(inputTex, vUv - vec2(0.0, d1.y)).rgb * 0.085;
+            color += texture2D(inputTex, vUv + q1).rgb * 0.065;
+            color += texture2D(inputTex, vUv - q1).rgb * 0.065;
+            color += texture2D(inputTex, vUv + vec2(q1.x, -q1.y)).rgb * 0.065;
+            color += texture2D(inputTex, vUv + vec2(-q1.x, q1.y)).rgb * 0.065;
+            color += texture2D(inputTex, vUv + vec2(d2.x, 0.0)).rgb * 0.04;
+            color += texture2D(inputTex, vUv - vec2(d2.x, 0.0)).rgb * 0.04;
+            color += texture2D(inputTex, vUv + vec2(0.0, d2.y)).rgb * 0.04;
+            color += texture2D(inputTex, vUv - vec2(0.0, d2.y)).rgb * 0.04;
+            color += texture2D(inputTex, vUv + q2).rgb * 0.02;
+            color += texture2D(inputTex, vUv - q2).rgb * 0.02;
+            color += texture2D(inputTex, vUv + vec2(q2.x, -q2.y)).rgb * 0.02;
+            color += texture2D(inputTex, vUv + vec2(-q2.x, q2.y)).rgb * 0.02;
+            gl_FragColor = vec4(color, 1.0);
+          }
+        `,
+      });
+
       this.compositeMaterial = new THREE.ShaderMaterial({
         uniforms: {
           sceneTex: { value: null },
           bloomHalf: { value: null },
           bloomQuarter: { value: null },
-          bloomEighth: { value: null },
+          bloomAura: { value: null },
           voidMaskTex: { value: null },
           bloomStrength: { value: 1.2 },
           exposure: { value: 1.08 },
@@ -112,7 +154,7 @@
           uniform sampler2D sceneTex;
           uniform sampler2D bloomHalf;
           uniform sampler2D bloomQuarter;
-          uniform sampler2D bloomEighth;
+          uniform sampler2D bloomAura;
           uniform sampler2D voidMaskTex;
           uniform float bloomStrength;
           uniform float exposure;
@@ -145,7 +187,7 @@
             vec3 sharp = texture2D(sceneTex, vUv).rgb;
             vec3 fine = texture2D(bloomHalf, vUv).rgb;
             vec3 medium = texture2D(bloomQuarter, vUv).rgb;
-            vec3 veil = texture2D(bloomEighth, vUv).rgb;
+            vec3 veil = texture2D(bloomAura, vUv).rgb;
             float voidMask = texture2D(voidMaskTex, vUv).r;
             float voidSolid = smoothstep(0.08, 0.92, voidMask);
             float voidCutout = 1.0 - voidSolid;
@@ -205,8 +247,7 @@
       this.halfB = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
       this.quarterA = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
       this.quarterB = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
-      this.eighthA = this._target(Math.ceil(width / 8), Math.ceil(height / 8));
-      this.eighthB = this._target(Math.ceil(width / 8), Math.ceil(height / 8));
+      this.auraTarget = this._target(Math.ceil(width / 6), Math.ceil(height / 6));
     }
 
     _draw(material, target) {
@@ -227,6 +268,14 @@
       uniforms.texelSize.value.set(1 / scratch.width, 1 / scratch.height);
       uniforms.direction.value.set(0, 1);
       this._draw(this.blurMaterial, output);
+    }
+
+    _aura(input, output, radius) {
+      const uniforms = this.auraMaterial.uniforms;
+      uniforms.inputTex.value = input.texture;
+      uniforms.texelSize.value.set(1 / input.width, 1 / input.height);
+      uniforms.radius.value = radius;
+      this._draw(this.auraMaterial, output);
     }
 
     render(scene, camera, options = {}) {
@@ -284,15 +333,13 @@
         this._draw(this.copyMaterial, this.quarterA);
         this._blur(this.quarterA, this.quarterB, this.quarterA, options.mediumRadius ?? 2.65);
 
-        this.copyMaterial.uniforms.inputTex.value = this.quarterA.texture;
-        this._draw(this.copyMaterial, this.eighthA);
-        this._blur(this.eighthA, this.eighthB, this.eighthA, options.veilRadius ?? 4.2);
+        this._aura(this.quarterA, this.auraTarget, options.veilRadius ?? 4.4);
 
         const composite = this.compositeMaterial.uniforms;
         composite.sceneTex.value = this.sceneTarget.texture;
         composite.bloomHalf.value = this.halfA.texture;
         composite.bloomQuarter.value = this.quarterA.texture;
-        composite.bloomEighth.value = this.eighthA.texture;
+        composite.bloomAura.value = this.auraTarget.texture;
         composite.voidMaskTex.value = this.voidMaskTarget.texture;
         composite.bloomStrength.value = options.bloomStrength ?? 1.18;
         composite.exposure.value = options.exposure ?? 1.08;
@@ -301,7 +348,7 @@
         this._draw(this.compositeMaterial, null);
       } catch (error) {
         this.enabled = false;
-        console.warn("SCViz: Magnetosphere HDR disabled", error);
+        console.warn("Soundstage: Magnetosphere HDR disabled", error);
         renderer.setRenderTarget(null);
         renderer.clear(true, true, true);
         renderer.render(scene, camera);
@@ -321,8 +368,7 @@
         "halfB",
         "quarterA",
         "quarterB",
-        "eighthA",
-        "eighthB",
+        "auraTarget",
       ]) {
         this[name]?.dispose();
         this[name] = null;
@@ -335,6 +381,7 @@
       this.brightMaterial.dispose();
       this.copyMaterial.dispose();
       this.blurMaterial.dispose();
+      this.auraMaterial.dispose();
       this.compositeMaterial.dispose();
       this.voidMaskMaterial.dispose();
     }
