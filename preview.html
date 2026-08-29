@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SCViz Magnetosphere Lab</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #020205; }
+      #viz { width: 100%; height: 100%; display: block; }
+      #wave { display: none; }
+      .panel {
+        position: fixed; z-index: 4; top: 16px; left: 16px; width: min(720px, calc(100vw - 32px));
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px;
+        border: 1px solid rgba(255,255,255,.13); border-radius: 16px;
+        color: rgba(255,255,255,.9); background: rgba(5,6,10,.62); backdrop-filter: blur(18px);
+        box-shadow: 0 18px 80px rgba(0,0,0,.38); transition: opacity .25s ease;
+      }
+      .panel.is-dim { opacity: .12; }
+      .brand { padding: 0 6px; margin-right: 4px; font-size: 12px; font-weight: 750; letter-spacing: .11em; text-transform: uppercase; }
+      button, select, input {
+        height: 34px; border: 1px solid rgba(255,255,255,.13); border-radius: 10px;
+        color: #fff; background: rgba(255,255,255,.075); font: inherit; font-size: 12px;
+      }
+      button, select { padding: 0 11px; cursor: pointer; }
+      button:hover, select:hover { background: rgba(255,255,255,.13); }
+      button[aria-pressed="true"] { color: #baff83; border-color: rgba(156,255,91,.52); }
+      label { display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,.55); font-size: 11px; }
+      input { width: 92px; padding: 0 9px; }
+      .status { margin-left: auto; padding: 0 5px; color: rgba(255,255,255,.46); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .hint { position: fixed; right: 16px; bottom: 16px; z-index: 3; color: rgba(255,255,255,.3); font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="viz"></canvas>
+    <canvas id="wave"></canvas>
+    <div class="panel" id="panel">
+      <span class="brand">Magnetosphere Lab</span>
+      <label>Scene
+        <select id="preset">
+          <option value="-1">Auto</option>
+          <option value="0" selected>Classic bouquet</option>
+          <option value="1">Gravity garden</option>
+          <option value="2">Wire spikes</option>
+          <option value="3">Ribbon storm</option>
+        </select>
+      </label>
+      <label>Audio
+        <select id="audio">
+          <option value="hero">Hero mix</option>
+          <option value="ambient">Ambient</option>
+          <option value="transient">Transient</option>
+          <option value="silence">Silence</option>
+        </select>
+      </label>
+      <button id="freeze" aria-pressed="false">Freeze</button>
+      <button id="lock" aria-pressed="false">Lock camera</button>
+      <label>Seed <input id="seed" value="1831565813" inputmode="numeric"></label>
+      <button id="reset">Reset</button>
+      <button id="shot">Screenshot</button>
+      <span class="status" id="status">starting…</span>
+    </div>
+    <div class="hint">H hides controls · deterministic seed + synthetic audio fixture</div>
+    <script src="src/vendor/three.min.js"></script>
+    <script src="src/magnetosphere-post.js"></script>
+    <script src="src/visualizer.js"></script>
+    <script>
+      const query = new URLSearchParams(location.search);
+      const seed = Number(query.get("seed") || 1831565813) >>> 0;
+      const preset = Number(query.get("preset") ?? 0);
+      const canvas = document.querySelector("#viz");
+      const viz = new SCVizVisualizer(canvas, document.querySelector("#wave"), {
+        magSeed: seed,
+        magPreset: preset,
+        preserveDrawingBuffer: true,
+      });
+      viz.setMode("magnetosphere");
+      viz.setAccent([116, 255, 92]);
+      viz.resize();
+      viz.start();
+
+      const freq = new Uint8Array(256);
+      const wave = new Uint8Array(512);
+      const audioSelect = document.querySelector("#audio");
+      const presetSelect = document.querySelector("#preset");
+      const status = document.querySelector("#status");
+      const seedInput = document.querySelector("#seed");
+      seedInput.value = String(seed);
+      presetSelect.value = String(preset);
+      let frames = 0;
+      let fpsAt = performance.now();
+
+      const feed = () => {
+        const t = performance.now() * 0.001;
+        const kind = audioSelect.value;
+        for (let i = 0; i < freq.length; i++) {
+          const falloff = Math.exp(-i / 82);
+          const beat = Math.pow(Math.max(0, Math.sin(t * 2.35) - 0.5), 3) * Math.exp(-i / 34);
+          const air = Math.max(0, Math.sin(t * 7.1 + i * 0.19)) * Math.exp(-Math.abs(i - 150) / 75);
+          let value = 0;
+          if (kind === "hero") value = 14 + falloff * (68 + 38 * Math.sin(t * 0.9 + i * 0.13)) + beat * 520 + air * 34;
+          if (kind === "ambient") value = 12 + falloff * (42 + 26 * Math.sin(t * 0.32 + i * 0.08));
+          if (kind === "transient") value = 8 + falloff * 32 + beat * 690 + air * 72;
+          freq[i] = Math.max(0, Math.min(255, value));
+        }
+        for (let i = 0; i < wave.length; i++) wave[i] = 128 + 78 * Math.sin(i * 0.09 + t * 5.5);
+        viz.setAudio(freq, wave);
+        frames++;
+        if (performance.now() - fpsAt > 500) {
+          const fps = Math.round(frames * 1000 / (performance.now() - fpsAt));
+          status.textContent = `${fps} fps · ${viz.mag?.particles.length || 0} particles · preset ${viz.mag?.preset ?? 0}`;
+          frames = 0;
+          fpsAt = performance.now();
+        }
+        requestAnimationFrame(feed);
+      };
+      feed();
+
+      presetSelect.addEventListener("change", () => {
+        viz.setMagnetosphereOptions({ preset: Number(presetSelect.value) });
+      });
+      const toggle = (id, key) => {
+        const button = document.querySelector(id);
+        button.addEventListener("click", () => {
+          const on = button.getAttribute("aria-pressed") !== "true";
+          button.setAttribute("aria-pressed", String(on));
+          viz.setMagnetosphereOptions({ [key]: on });
+        });
+      };
+      toggle("#freeze", "freeze");
+      toggle("#lock", "cameraLock");
+      document.querySelector("#reset").addEventListener("click", () => {
+        const next = new URL(location.href);
+        next.searchParams.set("seed", String(Number(seedInput.value) >>> 0));
+        next.searchParams.set("preset", presetSelect.value);
+        location.href = next;
+      });
+      document.querySelector("#shot").addEventListener("click", () => {
+        const link = document.createElement("a");
+        link.download = `magnetosphere-${Date.now()}.png`;
+        link.href = canvas.toDataURL("image/png");
+        link.click();
+      });
+      addEventListener("keydown", (event) => {
+        if (event.key.toLowerCase() === "h") document.querySelector("#panel").classList.toggle("is-dim");
+      });
+      addEventListener("resize", () => viz.resize());
+    </script>
+  </body>
+</html>

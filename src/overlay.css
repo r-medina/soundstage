@@ -1,0 +1,544 @@
+html.scviz-on {
+  --scviz-playbar: var(--play-controls-height, 48px);
+}
+
+html.scviz-on,
+html.scviz-on body {
+  overflow: hidden !important;
+}
+
+html.scviz-on header.header {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+html.scviz-on iframe.webiIframe,
+html.scviz-on iframe.webiIframeV2Layout {
+  visibility: hidden !important;
+}
+
+html.scviz-on .playControls {
+  z-index: 2147483000 !important;
+}
+
+html.scviz-on .playControls__queue {
+  z-index: 2147483001 !important;
+}
+
+html.scviz-hide-sc-comments canvas.waveformCommentsNode,
+html.scviz-hide-sc-comments .commentPopover,
+html.scviz-hide-sc-comments .commentPlaceholder {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.scviz-playbar-btn {
+  width: 24px;
+  height: 24px;
+  margin-right: 8px;
+  color: inherit;
+}
+
+.scviz-playbar-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.scviz-playbar-btn.is-on,
+.scviz-playbar-btn.is-on:hover {
+  color: #ff5500 !important;
+  color: var(--special-color, #ff5500) !important;
+}
+
+#scviz-root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: var(--scviz-playbar, 48px);
+  z-index: 10050;
+  display: none;
+  overflow: hidden;
+  color: #f4f4f4;
+  font-family: Interstate, "Lucida Grande", "Lucida Sans Unicode", "Lucida Sans",
+    Garuda, Verdana, Tahoma, sans-serif;
+  background: #070708;
+  isolation: isolate;
+}
+
+html.scviz-on #scviz-root {
+  display: flex;
+  flex-direction: column;
+}
+
+.scviz-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.scviz-art-bg {
+  position: absolute;
+  inset: -12%;
+  background: center / cover no-repeat;
+  filter: blur(48px) saturate(1.35);
+  opacity: 0.38;
+  transform: scale(1.12);
+  pointer-events: none;
+}
+
+#scviz-root.scviz-mode-magnetosphere .scviz-art-bg {
+  opacity: 0.12;
+  filter: blur(72px) saturate(1.65) brightness(0.55);
+}
+
+#scviz-root.scviz-mode-magnetosphere .scviz-vignette {
+  background:
+    radial-gradient(ellipse at 50% 45%, transparent 26%, rgba(0, 0, 0, 0.68) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.18), rgba(0, 0, 0, 0.58));
+}
+
+.scviz-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 50% 46%, transparent 18%, rgba(0, 0, 0, 0.55) 72%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.62));
+  pointer-events: none;
+}
+
+#scviz-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.scviz-center {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.scviz-disc {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  width: min(22vw, 220px);
+  height: min(22vw, 220px);
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #111 center / cover no-repeat;
+  box-shadow:
+    0 0 0 8px rgba(255, 255, 255, 0.04),
+    0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+.scviz-disc,
+.scviz-disc.is-hidden {
+  display: none;
+}
+
+.scviz-meta {
+  position: absolute;
+  left: 50%;
+  top: auto;
+  bottom: 16px;
+  transform: translateX(-50%);
+  text-align: center;
+  max-width: min(86vw, 720px);
+  opacity: 1;
+  transition: opacity 0.7s ease;
+}
+
+.scviz-title {
+  font-size: clamp(20px, 3.2vw, 36px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55);
+}
+
+.scviz-artist {
+  margin-top: 4px;
+  font-size: clamp(13px, 1.6vw, 18px);
+  color: rgba(255, 255, 255, 0.72);
+}
+
+
+
+.scviz-hud {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  z-index: 8;
+  opacity: 1;
+  transition: opacity 0.7s ease;
+  pointer-events: none;
+}
+
+#scviz-knobs {
+  pointer-events: auto;
+}
+
+.scviz-hud-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+  pointer-events: auto;
+}
+
+.scviz-chip {
+  appearance: none;
+  border: 0;
+  background: rgba(12, 12, 14, 0.55);
+  color: #fff;
+  backdrop-filter: blur(12px);
+  border-radius: 999px;
+  height: 34px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.scviz-chip:hover {
+  background: rgba(24, 24, 28, 0.72);
+}
+
+.scviz-chip.is-on {
+  box-shadow: inset 0 0 0 1px rgba(255, 85, 0, 0.7);
+  color: #ff7a33;
+}
+
+.scviz-chip svg {
+  width: 14px;
+  height: 14px;
+}
+
+.scviz-hint {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 1;
+  transition: opacity 0.7s ease;
+}
+
+.scviz-hint.is-gone {
+  opacity: 0;
+}
+
+.scviz-tray {
+  position: absolute;
+  top: 54px;
+  left: 12px;
+  width: min(560px, calc(100% - 24px));
+  z-index: 6;
+  pointer-events: none;
+}
+
+.scviz-tray-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(10, 10, 12, 0.86);
+  backdrop-filter: blur(16px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.scviz-tray.is-open .scviz-tray-panel,
+.scviz-tray.is-hold .scviz-tray-panel {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+#scviz-root.scviz-chrome-idle .scviz-hud,
+#scviz-root.scviz-chrome-idle .scviz-meta {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.scviz-tray-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+  min-width: 0;
+}
+
+.scviz-tray-item[data-for]:not([data-for="all"]) {
+  display: none;
+}
+
+#scviz-root.scviz-mode-bloom .scviz-tray-item[data-for="bloom"],
+#scviz-root.scviz-mode-ridge .scviz-tray-item[data-for="ridge"] {
+  display: flex;
+}
+
+.scviz-tray-item input[type="range"] {
+  width: 92px;
+  accent-color: #ff5500;
+}
+
+.scviz-tray-val {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.82);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 11px;
+}
+
+.scviz-toasts {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  height: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.scviz-toast {
+  position: absolute;
+  bottom: 0;
+  transform: translate(-50%, 0);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(360px, 46vw);
+  padding: 8px 12px 8px 8px;
+  border-radius: 999px;
+  background: rgba(10, 10, 12, 0.78);
+  box-shadow:
+    0 10px 30px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  animation: scviz-toast-in 4.2s ease forwards;
+}
+
+.scviz-toast img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+}
+
+.scviz-toast b {
+  display: block;
+  font-size: 11px;
+  color: #ff7a33;
+  font-weight: 700;
+}
+
+.scviz-toast span {
+  display: block;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+
+@keyframes scviz-toast-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 16px);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(-50%, -8px);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, -18px);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -36px);
+  }
+}
+
+.scviz-wave {
+  position: relative;
+  height: 168px;
+  flex: none;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.5));
+  cursor: pointer;
+}
+
+html.scviz-wave-off .scviz-wave {
+  display: none;
+}
+
+#scviz-wave-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.scviz-dots {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 10px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.scviz-dot {
+  position: absolute;
+  top: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  background: #444;
+}
+
+.scviz-dot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+html.scviz-comments-off .scviz-dots,
+html.scviz-comments-off .scviz-toasts,
+html.scviz-comments-off .scviz-rail {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .scviz-tray {
+    width: calc(100% - 24px);
+  }
+
+  .scviz-hint {
+    display: none;
+  }
+
+  .scviz-disc {
+    width: min(42vw, 180px);
+    height: min(42vw, 180px);
+  }
+
+  .scviz-wave {
+    height: 120px;
+  }
+
+  .scviz-rail {
+    display: none;
+  }
+}
+
+.scviz-rail {
+  position: absolute;
+  top: 64px;
+  right: 16px;
+  bottom: 16px;
+  width: min(320px, 32vw);
+  overflow: auto;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+  mask-image: linear-gradient(180deg, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+}
+
+.scviz-rail-empty {
+  margin-top: auto;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(10, 10, 12, 0.55);
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.scviz-rail-item {
+  appearance: none;
+  border: 0;
+  background: rgba(10, 10, 12, 0.55);
+  color: inherit;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.scviz-rail-item:hover,
+.scviz-rail-item.is-current {
+  background: rgba(20, 14, 10, 0.8);
+  box-shadow: inset 0 0 0 1px rgba(255, 85, 0, 0.45);
+}
+
+.scviz-rail-item img,
+.scviz-rail-fallback {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: none;
+  background: #333;
+}
+
+.scviz-rail-item b {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: #ff7a33;
+}
+
+.scviz-rail-item em {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 600;
+}
+
+.scviz-rail-item i {
+  display: block;
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.86);
+}
