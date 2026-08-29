@@ -1,4 +1,9 @@
 .DS_Store
 *.crx
 *.pem
+*.zip
 node_modules/
+.idea/
+.vscode/
+store/dist/
+*.log

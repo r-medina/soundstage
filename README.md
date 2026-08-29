@@ -1,55 +1,93 @@
 # SCViz
 
-A Chrome extension that adds a visualizer / playing mode to SoundCloud.
+A Chrome extension that adds a **visualizer / playing mode** to [SoundCloud](https://soundcloud.com).
 
-While a track is playing, a button appears in the player bar (next to Like / Follow / Next up). Toggle it to cover the page with a visualizer. SoundCloud’s player bar stays put, and the track waveform stays on the bottom of the overlay with a live oscilloscope on top of it.
+While a track plays, a button appears in the player bar. Toggle it and the page becomes a full-screen visualizer. SoundCloud’s play bar stays. The waveform stays at the bottom, with a live oscilloscope over it. Comments can sit on the waveform, pop as bubbles, or hide.
 
-There are four WebGL visualizers:
+**This project is not affiliated with SoundCloud.**
 
-- **Pulse** — a glowing wireframe orb that distorts with the music (Three.js / Codrops-style)
-- **Ridge** — receding Joy Division–style spectrum mountains
-- **Bloom** — a particle nebula that breathes with bass while its ring plane banks and the camera orbits, rises, and dives through the field
-- **Magnetosphere** — a cinematic recreation of Robert Hodgin's classic iTunes visualizer: 1,600 charged particles, long-lived hair and ribbon trails, light-absorbing black voids, live streak reflections, volumetric atmosphere, star flares, and three-scale HDR bloom
+[![License: MIT](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
-Cycle them from the HUD or with **V**. Comments can be shown or hidden — timed comments appear on the waveform, as bubbles, and in a list on the right.
+<p>
+  <img src="store/screenshots/01-pulse.png" alt="Pulse visualizer" width="48%">
+  <img src="store/screenshots/02-ridge.png" alt="Ridge visualizer" width="48%">
+</p>
+<p>
+  <img src="store/screenshots/03-bloom.png" alt="Bloom visualizer" width="48%">
+  <img src="store/screenshots/04-magnetosphere.png" alt="Magnetosphere visualizer" width="48%">
+</p>
 
-## Install
+## Visualizers
+
+| Mode | What you get |
+|---|---|
+| **Pulse** | Glowing wireframe orb that distorts with the music |
+| **Ridge** | Receding Joy Division–style spectrum ridges |
+| **Bloom** | Particle nebula that breathes with bass |
+| **Magnetosphere** | Cinematic take on Robert Hodgin’s iTunes visualizer: charged particles, trails, dark cores, atmosphere |
+
+Cycle with **V** or the HUD. Open **Knobs** (or **T**) to tune the active mode.
+
+## Install (development)
 
 1. Open `chrome://extensions`
 2. Turn on **Developer mode**
-3. Click **Load unpacked** and select this folder
-4. Open [soundcloud.com](https://soundcloud.com), play a track, and click the visualizer button in the bottom player
+3. **Load unpacked** and select this folder
+4. Open [soundcloud.com](https://soundcloud.com), play a track, click the visualizer button in the bottom player
 
-Chrome may warn that the extension can capture tab audio. That’s only used to drive the visualizer, and only while playing mode is on.
+Chrome may warn that the extension can capture tab audio. That feed stays in the tab and only drives the visualizer while playing mode is on.
+
+**Chrome Web Store:** see [`store/CHECKLIST.md`](store/CHECKLIST.md). Package with `scripts/package-extension.sh`.
 
 ## Use
 
-- **Visualizer button** in the SoundCloud player bar, or the extension icon, or `Alt+V`
-- **Esc** exits playing mode
-- **V** cycles visualizers
-- **C** toggles comments
-- Click the bottom waveform (or a comment in the list) to seek
+| Input | Action |
+|---|---|
+| Player-bar button, extension icon, or `Alt+V` | Toggle playing mode |
+| `Esc` | Exit |
+| `V` | Cycle visualizer |
+| `C` | Comments on/off |
+| `W` | Waveform on/off |
+| `T` | Knobs on/off |
+| Click the waveform or a comment | Seek |
 
-Comments show as avatars on the waveform, timed bubbles as the playhead hits them, and a list on the right.
+With the waveform off, the title and HUD fade after a few idle seconds. Move the mouse to bring them back.
 
-The knobs tray includes a global loudness-glow response plus mode-specific controls. Magnetosphere exposes reflectivity and automatic reflection flow, a subtle void halo, particle density and density flow, trail/ribbon intensity, atmosphere, bloom, motion, and core size. Its voids remain black at zero reflectivity, while the optional halo just reveals their silhouette; when reflectivity rises, they mirror the live streak field rather than a fixed highlight. Ridge height ranges up to 4.5.
+## Privacy
 
-Magnetosphere keeps its cinematic three-scale bloom and full-resolution void edges, but avoids multisampled HDR buffers, releases its render targets when inactive, reuses audio buffers, and adaptively lowers internal resolution only after sustained slow frames. The local lab reports frame time, quality scale, render resolution, and draw calls.
+No accounts, no analytics, no developer backend. Preferences stay in `chrome.storage.local`. Tab audio is analysed locally. Full policy: [`PRIVACY.md`](PRIVACY.md).
 
-## Files
+## Lab
+
+Open [`preview.html`](preview.html) on a local static server (no SoundCloud required):
+
+```bash
+python3 -m http.server 8765
+# http://127.0.0.1:8765/preview.html
+```
+
+Load or drop an MP3. `H` hides chrome. `?mode=ridge&hide=1` is useful for stills.
+
+## Layout
 
 ```
 manifest.json
-background.js
-src/page-bridge.js   # runs in the page, taps Web Audio + client id
-src/content.js       # overlay, player button, comments, capture fallback
-src/visualizer.js    # Three.js visualizers + waveform
-src/magnetosphere-post.js # Magnetosphere HDR bloom + filmic tone mapping
-src/vendor/three.min.js
+background.js            # toggle, tabCapture id, fetch proxy
+src/page-bridge.js       # MAIN-world audio tap + client id
+src/content.js           # overlay, button, comments, knobs
+src/visualizer.js        # Three.js modes + waveform
+src/magnetosphere-post.js
+src/frame.js
 src/overlay.css
-preview.html         # deterministic Magnetosphere scene/audio lab
-scripts/test-magnetosphere.js # long-run simulation and preset checks
-icons/
+src/vendor/three.min.js
+preview.html
+store/                   # Chrome Web Store copy + assets
 ```
 
-Open `preview.html` directly to tune or inspect the visualizers without SoundCloud. Click **Load song**—the modern Chrome picker starts in Downloads—or drag an MP3 onto the page. The lab uses a real Web Audio analyser and also provides synthetic fixtures, deterministic seeds, visualizer switching, PNG capture, and every tuning control from the extension. It shows only global controls plus those belonging to the active visualizer; Magnetosphere additionally exposes its presets, seed, camera lock, and freeze controls.
+## Credits
+
+Three.js (MIT). Magnetosphere is inspired by Robert Hodgin / The Barbarian Group’s iTunes visualizer; this is an original recreation, not an official port. Pulse draws on public Three.js / Codrops audio-visualization demos. See [`NOTICE`](NOTICE).
+
+## License
+
+[MIT](LICENSE)

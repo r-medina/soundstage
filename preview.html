@@ -132,7 +132,7 @@
         magSeed: seed,
         magPreset: preset,
       });
-      viz.setMode("magnetosphere");
+      viz.setMode(query.get("mode") || "magnetosphere");
       viz.setAccent([116, 255, 92]);
       viz.resize();
       viz.start();
@@ -154,7 +154,17 @@
           element.hidden = element.dataset.modeOnly !== activeMode;
         });
       };
+      if (query.get("mode")) {
+        const wanted = query.get("mode");
+        if ([...modeSelect.options].some((option) => option.value === wanted)) {
+          modeSelect.value = wanted;
+        }
+      }
       syncModeUi();
+      if (query.get("hide") === "1") {
+        document.querySelector("#panel")?.setAttribute("hidden", "");
+        document.querySelector(".hint")?.setAttribute("hidden", "");
+      }
       seedInput.value = String(seed);
       presetSelect.value = String(preset);
       let frames = 0;

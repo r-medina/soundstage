@@ -1,0 +1,20 @@
+SCViz includes third-party software and is inspired by prior visual work.
+
+Three.js
+  Copyright 2010-2023 Three.js Authors
+  Licensed under the MIT License
+  https://threejs.org
+
+Magnetosphere visualizer
+  Original concept and iTunes visualizer by Robert Hodgin / The Barbarian Group.
+  This project includes an original recreation for educational and personal
+  listening use. It is not affiliated with Apple or The Barbarian Group.
+
+Pulse visualizer
+  Orb / icosahedron treatment is inspired by public Three.js / Codrops
+  audio visualization demos.
+
+SoundCloud
+  SoundCloud is a trademark of SoundCloud Ltd. This project is an unofficial
+  Chrome extension and is not affiliated with, endorsed, or sponsored by
+  SoundCloud.
