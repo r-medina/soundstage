@@ -407,17 +407,18 @@
       clearTimeout(chromeTimer);
       if (!root || !document.documentElement.classList.contains("scviz-on")) {
         state.viz?.stop();
-        document.documentElement.classList.remove("scviz-on");
+        document.documentElement.classList.remove("scviz-on", "scviz-chrome-idle");
         applyCommentMode();
         return;
       }
       root.classList.remove("scviz-entering", "scviz-chrome-idle");
+      document.documentElement.classList.remove("scviz-chrome-idle");
       root.classList.add("scviz-exiting");
       state.transitionTimer = window.setTimeout(() => {
         if (state.on || state.transitionEpoch !== transitionEpoch) return;
         state.viz?.stop();
         root?.classList.remove("scviz-exiting");
-        document.documentElement.classList.remove("scviz-on");
+        document.documentElement.classList.remove("scviz-on", "scviz-chrome-idle");
         applyCommentMode();
       }, EXIT_TRANSITION_MS);
       return;
@@ -436,6 +437,7 @@
       return;
     }
     root.classList.remove("scviz-entering", "scviz-exiting", "scviz-chrome-idle");
+    document.documentElement.classList.remove("scviz-chrome-idle");
     void root.offsetWidth;
     root.classList.add("scviz-entering");
     state.transitionTimer = window.setTimeout(() => {
@@ -473,22 +475,26 @@
     hintTimer = setTimeout(() => hint.classList.add("is-gone"), 3500);
   }
 
+  function setChromeIdle(idle) {
+    if (!root) return;
+    root.classList.toggle("scviz-chrome-idle", idle);
+    document.documentElement.classList.toggle("scviz-chrome-idle", idle);
+  }
+
   function wakeChrome() {
     if (!root || !state.on) return;
-    root.classList.remove("scviz-chrome-idle");
+    setChromeIdle(false);
     clearTimeout(chromeTimer);
-    if (!state.waveOn) {
-      chromeTimer = setTimeout(tryHideChrome, 3800);
-    }
+    chromeTimer = setTimeout(tryHideChrome, 3800);
   }
 
   function tryHideChrome() {
-    if (!state.on || state.waveOn || !root) return;
+    if (!state.on || !root) return;
     if (root.querySelector(".scviz-tray.is-open, .scviz-tray.is-hold, .scviz-hud-actions:hover, #scviz-knobs:hover")) {
       chromeTimer = setTimeout(tryHideChrome, 2000);
       return;
     }
-    root.classList.add("scviz-chrome-idle");
+    setChromeIdle(true);
   }
 
   function startProgressLoop() {

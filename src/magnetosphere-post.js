@@ -104,6 +104,7 @@
           exposure: { value: 1.08 },
           saturation: { value: 1.08 },
           time: { value: 0 },
+          texelSize: { value: new THREE.Vector2(1, 1) },
         },
         depthTest: false,
         depthWrite: false,
@@ -118,6 +119,7 @@
           uniform float exposure;
           uniform float saturation;
           uniform float time;
+          uniform vec2 texelSize;
           varying vec2 vUv;
 
           vec3 acesFilm(vec3 x) {
@@ -141,8 +143,19 @@
             return fract(p.x * p.y);
           }
 
+          vec3 sampleSoft(sampler2D tex, vec2 uv) {
+            vec2 t = texelSize;
+            vec3 c = texture2D(tex, uv).rgb * 0.36;
+            c += texture2D(tex, uv + vec2(t.x, 0.0)).rgb * 0.16;
+            c += texture2D(tex, uv - vec2(t.x, 0.0)).rgb * 0.16;
+            c += texture2D(tex, uv + vec2(0.0, t.y)).rgb * 0.16;
+            c += texture2D(tex, uv - vec2(0.0, t.y)).rgb * 0.16;
+            return c;
+          }
+
           void main() {
-            vec3 sharp = texture2D(sceneTex, vUv).rgb;
+            vec3 raw = texture2D(sceneTex, vUv).rgb;
+            vec3 sharp = mix(raw, sampleSoft(sceneTex, vUv), 0.62);
             vec3 fine = texture2D(bloomHalf, vUv).rgb;
             vec3 medium = texture2D(bloomQuarter, vUv).rgb;
             vec3 veil = texture2D(bloomAura, vUv).rgb;
@@ -304,6 +317,7 @@
         composite.exposure.value = options.exposure ?? 1.08;
         composite.saturation.value = options.saturation ?? 1.08;
         composite.time.value = options.time ?? 0;
+        composite.texelSize.value.set(1 / this.sceneTarget.width, 1 / this.sceneTarget.height);
         this._draw(this.compositeMaterial, null);
       } catch (error) {
         this.enabled = false;

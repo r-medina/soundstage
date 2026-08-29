@@ -25,10 +25,18 @@ html.scviz-on iframe.webiIframeV2Layout {
 
 html.scviz-on .playControls {
   z-index: 2147483000 !important;
+  transition: opacity 0.55s ease, transform 0.55s ease;
 }
 
 html.scviz-on .playControls__queue {
   z-index: 2147483001 !important;
+}
+
+html.scviz-chrome-idle .playControls,
+html.scviz-chrome-idle .playControls__queue {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateY(110%);
 }
 
 html.scviz-hide-sc-comments canvas.waveformCommentsNode,
@@ -85,7 +93,7 @@ html.scviz-hide-sc-comments .commentPlaceholder {
   top: 0;
   left: 0;
   right: 0;
-  bottom: var(--scviz-playbar, 48px);
+  bottom: 0;
   z-index: 10050;
   display: none;
   overflow: hidden;
@@ -363,7 +371,7 @@ html.scviz-on #scviz-root {
   position: absolute;
   left: 50%;
   top: auto;
-  bottom: 16px;
+  bottom: calc(var(--scviz-playbar, 48px) + 16px);
   transform: translateX(-50%);
   text-align: center;
   max-width: min(86vw, 720px);
@@ -372,7 +380,7 @@ html.scviz-on #scviz-root {
 }
 
 html.scviz-on:not(.scviz-wave-off) .scviz-meta {
-  bottom: calc(var(--scviz-wave, 168px) + 16px);
+  bottom: calc(var(--scviz-playbar, 48px) + var(--scviz-wave, 168px) + 16px);
 }
 
 .scviz-title {
@@ -511,7 +519,9 @@ html.scviz-on:not(.scviz-wave-off) .scviz-meta {
 }
 
 #scviz-root.scviz-chrome-idle .scviz-hud,
-#scviz-root.scviz-chrome-idle .scviz-meta {
+#scviz-root.scviz-chrome-idle .scviz-meta,
+#scviz-root.scviz-chrome-idle .scviz-wave,
+#scviz-root.scviz-chrome-idle .scviz-tray {
   opacity: 0;
   pointer-events: none;
 }
@@ -611,14 +621,14 @@ html.scviz-on:not(.scviz-wave-off) .scviz-meta {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 18px;
+  bottom: calc(var(--scviz-playbar, 48px) + 18px);
   height: 0;
   pointer-events: none;
   z-index: 3;
 }
 
 html.scviz-on:not(.scviz-wave-off) .scviz-toasts {
-  bottom: calc(var(--scviz-wave, 168px) + 18px);
+  bottom: calc(var(--scviz-playbar, 48px) + var(--scviz-wave, 168px) + 18px);
 }
 
 .scviz-toast {
@@ -686,7 +696,7 @@ html.scviz-on:not(.scviz-wave-off) .scviz-toasts {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 0;
+  bottom: var(--scviz-playbar, 48px);
   z-index: 6;
   height: var(--scviz-wave, 168px);
   background: linear-gradient(180deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.5));
@@ -762,14 +772,14 @@ html.scviz-comments-off .scviz-rail {
 }
 
 html.scviz-on:not(.scviz-wave-off) .scviz-rail {
-  bottom: calc(var(--scviz-wave, 168px) + 16px);
+  bottom: calc(var(--scviz-playbar, 48px) + var(--scviz-wave, 168px) + 16px);
 }
 
 .scviz-rail {
   position: absolute;
   top: 64px;
   right: 16px;
-  bottom: 16px;
+  bottom: calc(var(--scviz-playbar, 48px) + 16px);
   width: min(320px, 32vw);
   overflow: auto;
   z-index: 3;
