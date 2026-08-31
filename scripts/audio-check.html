@@ -1,0 +1,394 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Soundstage audio engine check</title>
+<style>
+  body { background:#0b0c10; color:#dfe3ea; font:13px ui-monospace,Menlo,monospace; padding:20px; }
+  .ok { color:#7bdc7b } .bad { color:#ff6b7a } h1 { font-size:15px }
+</style>
+<h1>audio engine check</h1>
+<pre id="out">running…</pre>
+<script src="../src/audio-engine.js"></script>
+<script>
+/**
+ * Drives the engine off a synthetic 120 BPM loop so the analysis clock can be
+ * verified without a real track. Open directly in a browser, or evaluate
+ * window.__audioCheck from CDP.
+ */
+window.__audioCheck = (async () => {
+  const SECONDS = 16;
+  const ctx = new AudioContext();
+  const sr = ctx.sampleRate;
+
+  // One 2 s bar at 120 BPM: kick on 1 and 3, snare on 2 and 4, hats on the
+  // offbeat eighths, over a quiet 110 Hz bed. Each element occupies a
+  // different band, so onset attribution is checkable rather than vibes.
+  const BAR = 2;
+  // Four-on-the-floor with the downbeat emphasised, claps on 2 and 4, offbeat
+  // hats. Kick and clap land together on the backbeat, which is the realistic
+  // hard case for band-dominance gating.
+  const KICKS = [0, 0.5, 1, 1.5];
+  const KICK_AMP = [0.9, 0.62, 0.68, 0.62];
+  const SNARES = [0.5, 1.5];
+  const HATS = [0.25, 0.75, 1.25, 1.75];
+  const buf = ctx.createBuffer(1, Math.round(sr * BAR), sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.sin((2 * Math.PI * 110 * i) / sr) * 0.04;
+  const at = (t) => Math.round(t * sr);
+  KICKS.forEach((k, n) => {
+    const o = at(k);
+    for (let i = 0; i < sr * 0.14 && o + i < d.length; i++) {
+      const t = i / sr;
+      const f = 110 - 65 * Math.min(1, t / 0.05);
+      d[o + i] += Math.sin(2 * Math.PI * f * t) * Math.exp(-t * 30) * KICK_AMP[n];
+    }
+  });
+  // Deterministic noise: Math.random made this a flaky test, because the
+  // sub-130 Hz content of each snare varied run to run and occasionally
+  // tripped the kick stream for real.
+  let seed = 0x9e3779b9;
+  const rand = () => {
+    seed ^= seed << 13; seed >>>= 0;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5; seed >>>= 0;
+    return (seed / 4294967296) * 2 - 1;
+  };
+  // Real snares and hats are steeply high-passed; a 6 dB/oct roll-off leaves
+  // enough energy under the kick band to make stream attribution meaningless.
+  // Three cascaded one-pole stages gives 18 dB/oct, which is about right.
+  // `amp` is the peak amplitude of the finished burst: the filter cascade is
+  // normalized out first, so the level relationship between kit pieces is
+  // exactly what is written here rather than a function of the cutoff.
+  const noiseBurst = (len, cutoffHz, decay, amp, stages = 3) => {
+    const a = Math.exp((-2 * Math.PI * cutoffHz) / sr);
+    const out = new Float32Array(len);
+    const prevIn = new Float32Array(stages);
+    const prevOut = new Float32Array(stages);
+    let peak = 0;
+    for (let i = 0; i < len; i++) {
+      let x = rand();
+      for (let st = 0; st < stages; st++) {
+        const y = a * (prevOut[st] + x - prevIn[st]);
+        prevIn[st] = x;
+        prevOut[st] = y;
+        x = y;
+      }
+      out[i] = x;
+      if (Math.abs(x) > peak) peak = Math.abs(x);
+    }
+    const g = peak > 0 ? amp / peak : 0;
+    for (let i = 0; i < len; i++) out[i] *= g * Math.exp((-i / sr) * decay);
+    return out;
+  };
+  for (const sn of SNARES) {
+    const o = at(sn);
+    const body = noiseBurst(Math.round(sr * 0.16), 350, 26, 0.5);
+    for (let i = 0; i < body.length && o + i < d.length; i++) {
+      const t = i / sr;
+      d[o + i] += body[i] + Math.sin(2 * Math.PI * 210 * t) * Math.exp(-t * 26) * 0.22;
+    }
+  }
+  // Deliberately ~20 dB below the kick: with one global AGC these vanish.
+  for (const h of HATS) {
+    const o = at(h);
+    const tick = noiseBurst(Math.round(sr * 0.05), 4000, 150, 0.085);
+    for (let i = 0; i < tick.length && o + i < d.length; i++) d[o + i] += tick[i];
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+
+  const frames = [];
+  const events = { low: [], mid: [], high: [] };
+  const beats = [];
+  const diagExtra = [];
+  const acfDump = [];
+  let lockAt = -1;
+  let lastOffset = -1;
+  let lastScores = [0, 0, 0, 0];
+  // ?force=scriptprocessor|polling exercises the fallback tiers.
+  const force = new URLSearchParams(location.search).get("force") || undefined;
+  const engine = new ScvizAudio.AudioEngine(ctx, src, {
+    force,
+    workletUrl: new URL("../src/audio-worklet.js", location.href).href,
+    onFrame: (f) => {
+      frames.push({ t: f.t, bass: f.bass, mid: f.mid, high: f.high,
+                    kick: f.kick, loudness: f.loudness, flux: f.flux,
+                    envLow: f.onset.low, envHigh: f.onset.high,
+                    bpm: f.bpm, conf: f.confidence, phase: f.beatPhase });
+      if (f.beat) beats.push({ t: f.t, down: f.downbeat, bpm: f.bpm, conf: f.confidence });
+      if (f.confidence > 0.5 && lockAt < 0) lockAt = f.t;
+      for (const k of ["low", "mid", "high"]) {
+        if (f.hit[k] > 0) {
+          events[k].push({ t: f.t, s: f.hit[k], surprise: f.surprise[k],
+                           oLow: f.odf.low, oMid: f.odf.mid, oHigh: f.odf.high,
+                           bi: f.beatIndex, ph: f.beatPhase, conf: f.confidence });
+        }
+      }
+    },
+  });
+  await engine.start();
+  const startAt = ctx.currentTime + 0.25;
+  src.start(startAt);
+  await ctx.resume();
+  await new Promise((r) => setTimeout(r, SECONDS * 1000));
+  const status = engine.status();
+  lastOffset = engine.clock.downbeatOffset;
+  lastScores = Array.from(engine.clock.dbScore);
+  {
+    const ck = engine.clock;
+    const rows = [];
+    for (let L = ck.minLag; L <= ck.maxLag; L++) {
+      rows.push({ L, acf: ck.acf[L], score: ck.score[L], bpm: (60 * ck.rate) / L });
+    }
+    const byAcf = rows.slice().sort((a, b) => b.acf - a.acf).slice(0, 6);
+    const byScore = rows.slice().sort((a, b) => b.score - a.score).slice(0, 6);
+    acfDump.push(`rate ${ck.rate.toFixed(2)} lags ${ck.minLag}..${ck.maxLag} win ${ck.win}`);
+    acfDump.push("top acf:   " + byAcf.map((r) => `L${r.L}/${r.bpm.toFixed(1)}bpm=${r.acf.toFixed(3)}`).join("  "));
+    acfDump.push("top score: " + byScore.map((r) => `L${r.L}/${r.bpm.toFixed(1)}bpm=${r.score.toFixed(3)}`).join("  "));
+    acfDump.push(`acfPeriod ${ck.acfPeriod.toFixed(5)}s (${(60 / ck.acfPeriod).toFixed(2)} bpm)  pll ${ck.period.toFixed(5)}s (${(60 / ck.period).toFixed(2)} bpm)`);
+    acfDump.push("hist: " + Array.from(ck.hist).map((v) => (v > 0.001 ? v.toFixed(2) : ".")).join(" "));
+  }
+  engine.stop();
+
+  // --- assertions ---------------------------------------------------------
+  const results = [];
+  const add = (name, ok, detail) => results.push({ name, ok, detail });
+
+  add(`pump is ${force || "worklet"}`, status.source === (force || "worklet"), status.source);
+  if (status.source !== "polling") add("no dropped hops", status.gaps === 0, `gaps ${status.gaps}`);
+
+  const span = frames.length > 1 ? frames[frames.length - 1].t - frames[0].t : 0;
+  const measured = span > 0 ? (frames.length - 1) / span : 0;
+  // Below ~50 Hz the rAF fallback cannot support beat tracking at all, and the
+  // engine is supposed to say so rather than guess. Declared here because the
+  // onset assertions below need it too.
+  const degraded = status.source === "polling" && measured < 50;
+  if (status.source === "polling") {
+    add("polling still reaches a usable rate", measured >= 25, `${measured.toFixed(2)} Hz (rAF bound)`);
+  } else {
+    add("hop rate matches sampleRate/hop", Math.abs(measured - status.hopRate) < 0.5,
+        `${measured.toFixed(2)} vs ${status.hopRate.toFixed(2)} Hz`);
+    let maxJitter = 0;
+    const nominal = status.hop / status.sampleRate;
+    for (let i = 1; i < frames.length; i++) {
+      maxJitter = Math.max(maxJitter, Math.abs(frames[i].t - frames[i - 1].t - nominal));
+    }
+    // Only the worklet can promise this: it runs on the audio thread. The
+    // ScriptProcessor fallback runs on the main thread and can miss a callback
+    // outright when the page is busy, which is exactly why it is tier two.
+    if (status.source === "worklet") {
+      add("hop spacing is sample-exact", maxJitter < 1e-6, `max jitter ${(maxJitter * 1e6).toFixed(2)} us`);
+    } else {
+      add("hop spacing stays within one hop", maxJitter < nominal,
+          `max jitter ${(maxJitter * 1000).toFixed(2)} ms vs ${(nominal * 1000).toFixed(2)} ms hop`);
+    }
+  }
+  add("cost per hop under 0.3 ms", status.costMs < 0.3, `${status.costMs.toFixed(3)} ms`);
+
+  // Onset layer. Only events after the loop has actually started count.
+  const t0 = startAt;
+  const settle = t0 + 0.4; // let the whitening gains and medians fill
+  const windowEnd = frames.length ? frames[frames.length - 1].t : t0;
+  const dur = Math.max(0.001, windowEnd - settle);
+  const after = (k) => events[k].filter((e) => e.t >= settle);
+
+  const expectedTimes = (offsets) => {
+    const out = [];
+    for (let bar = 0; t0 + bar * BAR < windowEnd + BAR; bar++) {
+      for (const o of offsets) {
+        const t = t0 + bar * BAR + o;
+        if (t >= settle && t <= windowEnd) out.push(t);
+      }
+    }
+    return out;
+  };
+  const nearestErr = (t, times) => Math.min(...times.map((x) => Math.abs(t - x)));
+
+  const lows = after("low");
+  const kickTimes = expectedTimes(KICKS);
+  add("kick stream fires once per kick", Math.abs(lows.length - kickTimes.length) <= 1,
+      `${lows.length} onsets vs ${kickTimes.length} kicks`);
+
+  const lowErrs = lows.map((e) => nearestErr(e.t, kickTimes)).sort((a, b) => a - b);
+  const medErr = lowErrs.length ? lowErrs[lowErrs.length >> 1] : 1;
+  const worstErr = lowErrs.length ? lowErrs[lowErrs.length - 1] : 1;
+  // Derived from the pump's own resolution: an onset cannot be located more
+  // precisely than the interval between analysis frames, so a fixed threshold
+  // would just be asserting the frame rate.
+  const timeTol = Math.max(0.035, 1.6 / Math.max(1, measured));
+  add("kick onsets land on the kicks", medErr < timeTol,
+      `median ${(medErr * 1000).toFixed(1)} ms, worst ${(worstErr * 1000).toFixed(1)} ms (tol ${(timeTol * 1000).toFixed(0)})`);
+
+  // Every kick must be found, not just most of them.
+  const missed = kickTimes.filter((k) => !lows.some((e) => Math.abs(e.t - k) < 0.06)).length;
+  add("no kick is missed", missed === 0, `${missed} missed of ${kickTimes.length}`);
+
+  const mids = after("mid");
+  const snareTimes = expectedTimes(SNARES);
+  const snareHit = snareTimes.filter((sn) => mids.some((e) => Math.abs(e.t - sn) < 0.06)).length;
+  add("snare stream finds the snares", snareHit >= snareTimes.length - 1,
+      `${snareHit}/${snareTimes.length} matched, ${mids.length} mid onsets total`);
+
+  // The whitening test: hats sit ~20 dB under the kick. A single global AGC
+  // buries them; per-band gain should surface every one.
+  const highs = after("high");
+  const hatTimes = expectedTimes(HATS);
+  const hatHit = hatTimes.filter((h) => highs.some((e) => Math.abs(e.t - h) < 0.06)).length;
+  // rAF polling misses some of the quietest transients outright; it cannot
+  // see between its own samples. Scored against the tier's actual ability.
+  if (degraded) {
+    // At this rate the quietest transients fall between samples entirely.
+    // Recorded, not asserted -- it is a property of the pump, not the layer.
+    diagExtra.push(`hats at ${measured.toFixed(0)} Hz: ${hatHit}/${hatTimes.length} (informational)`);
+  } else {
+    const hatFloor = status.source === "polling"
+      ? Math.ceil(hatTimes.length * 0.75)
+      : hatTimes.length - 1;
+    add("whitening surfaces the quiet hats", hatHit >= hatFloor,
+        `${hatHit}/${hatTimes.length} matched (floor ${hatFloor})`);
+  }
+
+  // Detection latency: how long after the transient the onset fires. One hop
+  // is the floor; anything past ~35 ms would be visible.
+  // Median, not mean: a single false positive half a bar away would otherwise
+  // swamp the statistic we actually care about.
+  const lat = lows.map((e) => e.t - kickTimes.reduce((best, k) =>
+      Math.abs(e.t - k) < Math.abs(e.t - best) ? k : best, kickTimes[0] ?? 0))
+      .sort((a, b) => a - b);
+  const medLat = lat.length ? lat[lat.length >> 1] : 1;
+  add("detection latency within one hop of the transient",
+      medLat >= 0 && medLat < timeTol,
+      `median ${(medLat * 1000).toFixed(1)} ms (tol ${(timeTol * 1000).toFixed(0)})`);
+
+  // Surprisal should not saturate: a steady loop is not surprising.
+  const surpr = lows.map((e) => e.surprise);
+  const lateSurprise = surpr.length > 3 ? surpr[surpr.length - 1] : 99;
+  add("surprisal settles near 1 on a repetitive loop", lateSurprise > 0.4 && lateSurprise < 2.2,
+      `last ${lateSurprise.toFixed(2)}, first ${(surpr[0] ?? 0).toFixed(2)}`);
+
+  const maxEnvLow = Math.max(...frames.map((f) => f.envLow));
+  const maxEnvHigh = Math.max(...frames.map((f) => f.envHigh));
+  add("onset envelopes reach full scale", maxEnvLow > 0.6 && maxEnvHigh > 0.4,
+      `low ${maxEnvLow.toFixed(2)} high ${maxEnvHigh.toFixed(2)}`);
+
+  // --- beat clock ---------------------------------------------------------
+  const last = frames[frames.length - 1] || {};
+  // The polling tier samples the detection function at rAF, so the intervals
+  // are not uniform and the autocorrelation cannot be as precise. It is the
+  // last-resort pump; hold it to a looser bound rather than pretend otherwise.
+  if (degraded) {
+    add("degraded pump declines to lock rather than guessing", (last.conf || 0) === 0,
+        `${measured.toFixed(1)} Hz, confidence ${(last.conf || 0).toFixed(2)}, bpm ${(last.bpm || 0).toFixed(1)}`);
+  }
+  const bpmTol = status.source === "polling" ? 6 : 2;
+  if (!degraded) add("tempo locks to 120 BPM", Math.abs(last.bpm - 120) < bpmTol,
+      `${(last.bpm || 0).toFixed(2)} bpm (tol ${bpmTol})`);
+  if (!degraded) add("locks within 8 s", lockAt > 0 && lockAt - t0 < 8,
+      lockAt > 0 ? `${(lockAt - t0).toFixed(1)} s` : "never locked");
+  const confMin = status.source === "polling" ? 0.15 : 0.6;
+  if (!degraded) add("confidence is high once locked", last.conf > confMin,
+      `${(last.conf || 0).toFixed(2)} (min ${confMin})`);
+
+  // Beats must land on the real grid, and the phase ramp must stay monotonic
+  // between them -- a tracker that jumps to correct itself looks worse than
+  // one that is slightly off.
+  const settledBeats = beats.filter((b) => lockAt > 0 && b.t > lockAt + 1);
+  const beatErr = settledBeats
+    .map((b) => { const ph = (((b.t - t0) % 0.5) + 0.5) % 0.5; return Math.min(ph, 0.5 - ph); })
+    .sort((a, b) => a - b);
+  const medBeatErr = beatErr.length ? beatErr[beatErr.length >> 1] : 1;
+  // The polling tier samples the detection function at rAF, so its phase
+  // reference is inherently coarser. Score each tier against what it can
+  // actually achieve rather than pretend they are equivalent.
+  const gridTol = status.source === "polling" ? 0.08 : 0.04;
+  if (!degraded) add("beats land on the true grid", settledBeats.length > 4 && medBeatErr < gridTol,
+      `${settledBeats.length} beats, median ${(medBeatErr * 1000).toFixed(0)} ms off (tol ${gridTol * 1000})`);
+
+  // The offset snaps once when the clock first locks -- it has to start
+  // somewhere. The guarantee is that nothing jumps after that.
+  // Compare the phase step against the time that actually elapsed. A stalled
+  // frame legitimately advances the phase a long way; what must never happen
+  // is the phase moving further than elapsed time can explain, which is the
+  // tracker correcting itself with a jump.
+  let jumps = 0;
+  let worstJump = 0;
+  for (let i = 1; i < frames.length; i++) {
+    if (!(frames[i].conf > 0.5) || frames[i].t < lockAt + 1.5) continue;
+    const beatSecs = 60 / (frames[i].bpm || 120);
+    let d2 = frames[i].phase - frames[i - 1].phase;
+    if (d2 < -0.5) d2 += 1; // ordinary wrap at the beat
+    const expected = (frames[i].t - frames[i - 1].t) / beatSecs;
+    const slip = Math.abs(d2 - expected);
+    if (slip > worstJump) worstJump = slip;
+    if (slip > 0.25) jumps++;
+  }
+  // Polling can re-lock mid-run (its tempo estimate is noisier), and a
+  // re-lock legitimately re-seeds the phase once.
+  const jumpAllow = status.source === "polling" ? 1 : 0;
+  if (!degraded) add("phase never jumps once settled", jumps <= jumpAllow,
+      `${jumps} discontinuities (allow ${jumpAllow}), worst slip ${(worstJump * 100).toFixed(1)}% of a beat`);
+
+  // Downbeats must sit on bar starts, and must agree with each other: a
+  // downbeat that migrates around the bar is worse than none at all.
+  const downs = settledBeats.filter((b) => b.down);
+  const downErr = downs
+    .map((b) => { const ph = (((b.t - t0) % BAR) + BAR) % BAR; return Math.min(ph, BAR - ph); })
+    .sort((a, b) => a - b);
+  const medDownErr = downErr.length ? downErr[downErr.length >> 1] : 9;
+  if (!degraded) add("downbeat lands on the emphasised one", downs.length >= 2 && medDownErr < 0.06,
+      `${downs.length} downbeats, median ${(medDownErr * 1000).toFixed(0)} ms off`);
+  const spreadTol = status.source === "polling" ? 0.13 : 0.06;
+  if (!degraded) add("downbeat never moves around the bar",
+      downErr.length < 2 || downErr[downErr.length - 1] - downErr[0] < spreadTol,
+      `spread ${(((downErr[downErr.length - 1] || 0) - (downErr[0] || 0)) * 1000).toFixed(0)} ms (tol ${spreadTol * 1000})`);
+
+  // Diagnostic: label each low-stream onset by the nearest scored element so
+  // band ratios can be compared between true kicks and leakage.
+  const label = (t) => {
+    const cands = [["kick", KICKS], ["snare", SNARES], ["hat", HATS]];
+    let best = "?";
+    let bestD = 1e9;
+    for (const [name, offs] of cands) {
+      for (const o of offs) {
+        const phase = Math.abs((((t - t0) % BAR) + BAR) % BAR - o);
+        const dd = Math.min(phase, BAR - phase);
+        if (dd < bestD) { bestD = dd; best = name; }
+      }
+    }
+    return `${best}${bestD > 0.06 ? "?" : ""}`;
+  };
+  diagExtra.push(`downbeats total ${beats.filter((b) => b.down).length} of ${beats.length} beats`);
+  diagExtra.push(`dbOffset ${lastOffset} dbScore [${lastScores.map((v) => v.toFixed(2)).join(", ")}]`);
+  // Cross-tabulate: which bar position the clock charges each onset to,
+  // against where the onset really sits in the bar.
+  {
+    const cells = {};
+    for (const k of ["low", "mid"]) {
+      for (const e of events[k]) {
+        if (!(e.conf > 0.5)) continue;
+        const cls = ((((e.ph > 0.5 ? e.bi + 1 : e.bi) % 4) + 4) % 4);
+        const rel = ((((e.t - t0) % BAR) + BAR) % BAR);
+        const trueBeat = Math.round(rel / 0.5) % 4;
+        const key = `${k} cls${cls}<-beat${trueBeat + 1}`;
+        cells[key] = (cells[key] || 0) + 1;
+      }
+    }
+    diagExtra.push("attribution: " + Object.entries(cells).sort().map(([k2, v]) => `${k2}x${v}`).join("  "));
+  }
+  const diag = after("low").map((e) =>
+    `${label(e.t)} oLow ${e.oLow.toFixed(4)} oMid ${e.oMid.toFixed(4)} oHigh ${e.oHigh.toFixed(4)} s ${e.s.toFixed(2)}`);
+
+  const out = {
+    status,
+    frames: frames.length,
+    results,
+    diag: acfDump.concat(diagExtra, diag),
+    failed: results.filter((r) => !r.ok).length,
+  };
+  document.querySelector("#out").innerHTML =
+    `sampleRate ${status.sampleRate}  hop ${status.hop}  fft ${status.frame}  frames ${frames.length}\n\n` +
+    results.map((r) => `<span class="${r.ok ? "ok" : "bad"}">${r.ok ? "  ok  " : "FAIL  "}${r.name}</span>  ${r.detail || ""}`).join("\n") +
+    `\n\n${out.failed ? out.failed + " failure(s)" : "all passed"}`;
+  return out;
+})();
+</script>

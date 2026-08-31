@@ -6,7 +6,15 @@
     { id: "ridge", label: "Ridge" },
     { id: "bloom", label: "Bloom" },
     { id: "magnetosphere", label: "Magnetosphere" },
+    { id: "dance", label: "Dance" },
   ];
+  // The Dance clip is 3.333 s, i.e. 8 beats at 144 BPM. Rate is latched on
+  // each downbeat against that, so the figures step with the track without
+  // being yanked around by every tempo nudge.
+  const DANCE_CLIP_BEATS = 8;
+  const DANCERS = 7;
+  // Thrown on a downbeat, one dancer at a time.
+  const DANCE_ACCENTS = ["Jump", "ThumbsUp", "Wave", "Punch", "Yes"];
   const LEGACY = {
     orb: "pulse",
     bars: "ridge",
@@ -16,7 +24,12 @@
   };
   const RIDGE_ROWS = 260;
   const RIDGE_COLS = 160;
+  const BEAT_LOUD_MEMORY = 7; // seconds of loudness range to normalise against
   const RIDGE_STEP = 0.04;
+  // Rows drawn per beat once the clock is locked. Twelve puts the row rate at
+  // ~0.041 s around 122 BPM, so the look barely changes -- but the rows now
+  // land ON the grid instead of drifting across it.
+  const RIDGE_ROWS_PER_BEAT = 12;
   const BLOOM_COUNT = 7000;
   const MAG_ATTRACTORS = 5;
   const MAG_PARTICLES = 1600;
@@ -108,6 +121,58 @@
       this.smoothBass = 0;
       this.rawSmoothBass = 0;
       this.kick = 0;
+      this.flux = 0;
+      // Onset layer (P1). `onset` are envelopes and can be sampled freely;
+      // `hit` is a discrete impulse accumulated between renders so an event
+      // is never dropped when the analysis clock outruns the render clock.
+      this.onset = { low: 0, mid: 0, high: 0 };
+      this.surprise = { low: 0, mid: 0, high: 0 };
+      this.since = { low: 1e6, mid: 1e6, high: 1e6 };
+      this.hit = { low: 0, mid: 0, high: 0 };
+      this._pendingHit = { low: 0, mid: 0, high: 0 };
+      // Beat clock (P2). `beatPhase` is predictive and free-running, so read
+      // it directly rather than waiting for `beat`; `timeToNextBeat` lets a
+      // move start before the beat instead of chasing it. Gate anything
+      // grid-driven on `beatConfidence` so rubato material degrades to the
+      // reactive envelopes rather than looking wrong.
+      this.bpm = 0;
+      this.beatLocked = false;
+      this.beatConfidence = 0;
+      this.beatPhase = 0;
+      this.barPhase = 0;
+      this.phrasePhase = 0;
+      this.beatIndex = 0;
+      this.barIndex = 0;
+      this.timeToNextBeat = 0;
+      this.beatHit = false;
+      this.downbeatHit = false;
+      this.downbeatConfidence = 0;
+      this._pendingBeat = false;
+      this._pendingDownbeat = false;
+      // Derived motion (P3). Modes read these instead of raw levels, so audio
+      // supplies forces and the springs decide the pose.
+      this.motion = {
+        gridMix: 0,
+        accent: 0,
+        beatAmp: 0.5,
+        anticipation: 0,
+        bar: 0,
+        phrase: 0,
+        calm: 1,
+        live: 1,
+        sensitivity: 1,
+        loudness: 0.5,
+        spin: 0,
+        kick: 0,
+        snare: 0,
+        hat: 0,
+        downbeat: 0,
+      };
+      this.dynGain = 1;
+      this.dynPeak = 0.28;
+      // True once a fixed-hop AudioEngine is feeding us. Frames already carry
+      // the envelopes, so nothing is recomputed at render rate.
+      this.engineDriven = false;
       this.hasAudio = false;
       this.mode = "pulse";
       this.discEl = null;
@@ -123,6 +188,7 @@
         bloomSize: 1,
         bloomSpread: 0.55,
         bloomSpin: 1,
+        bloomSwirl: 1.5,
         bloomShape: 0.28,
         bloomHue: 0.72,
         bloomWarm: 0.42,
@@ -156,6 +222,7 @@
       this.bloomDance = 0;
       this.magnetosphereMid = null;
       this.magQualityScale = 1;
+      this.magCoreScale = 1;
       this.frameMsSmooth = 16.7;
       this._slowRenderSeconds = 0;
       this._fastRenderSeconds = 0;
@@ -182,6 +249,8 @@
         this.ridge.visible = this.mode === "ridge";
         this.bloom.visible = this.mode === "bloom";
         if (this.magnetosphere) this.magnetosphere.visible = this.mode === "magnetosphere";
+        if (this.dance) this.dance.visible = this.mode === "dance";
+        if (this.mode === "dance") this._loadDancers();
       }
       if (this.scene) {
         this.scene.fog = this.mode === "ridge" ? this.ridgeFog : null;
@@ -219,6 +288,7 @@
         bloomSize: [0.4, 2.2],
         bloomSpread: [0, 1.6],
         bloomSpin: [0, 2.5],
+        bloomSwirl: [0, 5],
         bloomShape: [0, 1],
         bloomHue: [0, 1],
         bloomWarm: [0, 1],
@@ -257,7 +327,69 @@
       return this.mode;
     }
 
+    /**
+     * Fixed-hop frame from ScvizAudio.AudioEngine. Preferred path: the
+     * spectrum is unclipped and unsmoothed, and the envelopes were stepped on
+     * the analysis clock rather than on whatever the renderer managed.
+     */
+    setFrame(frame) {
+      if (!frame) return;
+      this.engineDriven = true;
+      this.hasAudio = true;
+      const freq = frame.freq;
+      if (freq?.length) {
+        if (this.freq.length !== freq.length) this.freq = new Uint8Array(freq.length);
+        this.freq.set(freq);
+      }
+      const time = frame.time;
+      if (time?.length) {
+        if (this.time.length !== time.length) this.time = new Uint8Array(time.length);
+        this.time.set(time);
+      }
+      this.bass = frame.bass;
+      this.mid = frame.mid;
+      this.high = frame.high;
+      this.smoothBass = frame.smoothBass;
+      // Unshaped bass follower. Bloom's spin rate and dance target both read
+      // it, and it was never being copied across -- so it sat at 0 and those
+      // terms were silently dead.
+      this.rawSmoothBass = frame.rawSmoothBass ?? frame.smoothBass;
+      this.kick = frame.kick;
+      this.loudness = frame.loudness;
+      this.energy = frame.energy;
+      this.integratedPower = frame.integratedPower;
+      this.flux = frame.flux;
+      this.dynGain = frame.gain;
+      this.dynPeak = frame.peak;
+      if (frame.onset) {
+        const pending = this._pendingHit;
+        for (const k of ["low", "mid", "high"]) {
+          this.onset[k] = frame.onset[k];
+          this.surprise[k] = frame.surprise[k];
+          this.since[k] = frame.since[k];
+          const h = frame.hit[k];
+          if (h > pending[k]) pending[k] = h;
+        }
+      }
+      if (frame.bpm !== undefined) {
+        this.bpm = frame.bpm;
+        this.beatLocked = Boolean(frame.locked);
+        this.beatConfidence = frame.confidence;
+        this.beatPhase = frame.beatPhase;
+        this.barPhase = frame.barPhase;
+        this.phrasePhase = frame.phrasePhase;
+        this.beatIndex = frame.beatIndex;
+        this.barIndex = frame.barIndex;
+        this.timeToNextBeat = frame.timeToNextBeat;
+        this.downbeatConfidence = frame.downbeatConfidence || 0;
+        if (frame.beat) this._pendingBeat = true;
+        if (frame.downbeat) this._pendingDownbeat = true;
+      }
+    }
+
+    /** Legacy path: raw analyser bytes, analysed at render rate. */
     setAudio(freq, time) {
+      this.engineDriven = false;
       if (freq?.length) {
         if (this.freq.length !== freq.length) this.freq = new Uint8Array(freq.length);
         this.freq.set(freq);
@@ -346,8 +478,14 @@
     resize() {
       const rect = this.canvas.getBoundingClientRect();
       const deviceDpr = window.devicePixelRatio || 1;
-      const dprCap = this.mode === "magnetosphere" ? 1.35 : 1.75;
-      const quality = this.mode === "magnetosphere" ? this.magQualityScale : 1;
+      const isMag = this.mode === "magnetosphere";
+      const dprCap = isMag ? 1.35 : 1.75;
+      const quality = isMag ? this.magQualityScale : 1;
+      // Floor stays low on purpose: dropping resolution is the escape hatch for
+      // machines that cannot keep up, and raising it would remove that. Edge
+      // aliasing is handled by multisampling the render target instead, which
+      // buys far more per unit cost than extra pixels -- and is switched off
+      // first when the quality scale backs down.
       const dpr = Math.max(0.75, Math.min(dprCap, deviceDpr) * quality);
       if (this.renderer) {
         this.renderer.setPixelRatio(dpr);
@@ -357,7 +495,11 @@
         if (this.magPost && this.mode === "magnetosphere") {
           this._postSize ||= new THREE.Vector2();
           this.renderer.getDrawingBufferSize(this._postSize);
-          this.magPost.resize(this._postSize.x, this._postSize.y);
+          // MSAA only while there is headroom. The renderer's antialias flag
+          // does nothing here because the scene is rendered into a target, so
+          // without this magnetosphere is the one mode with no antialiasing.
+          const samples = this.magQualityScale >= 0.99 ? 4 : 0;
+          this.magPost.resize(this._postSize.x, this._postSize.y, samples);
         }
       }
       if (this.mode === "ridge") {
@@ -437,6 +579,7 @@
         audioLevel: { value: 0 },
         loudness: { value: 0 },
         loudGlow: { value: this.params.loudGlow },
+        bloomSwirlAngle: { value: 0 },
         bass: { value: 0 },
         color: { value: new THREE.Color(1, 0.33, 0) },
         bands: { value: this.bandTex },
@@ -469,7 +612,8 @@
       this.ridge = this._makeRidge();
       this.bloom = this._makeBloom();
       this.magnetosphere = this._makeMagnetosphere();
-      this.scene.add(this.pulse, this.ridge, this.bloom, this.magnetosphere);
+      this.dance = this._makeDance();
+      this.scene.add(this.pulse, this.ridge, this.bloom, this.magnetosphere, this.dance);
       this.setMode(this.mode);
       this.resize();
     }
@@ -918,9 +1062,40 @@
       const seeds = new Float32Array(BLOOM_COUNT);
       const bands = new Float32Array(BLOOM_COUNT);
       const sizes = new Float32Array(BLOOM_COUNT);
+      // 1 = far-field orb: background, volumetric, largely exempt from the
+      // shaping and swirl that the main cloud gets.
+      const depths = new Float32Array(BLOOM_COUNT);
+      // 1 = belongs to the outer disc and may shear. The central shell must
+      // NOT: it is a 3D sphere, and shearing it by xz radius rotates its
+      // latitude bands against each other, which looks like the core melting
+      // rather than like rings orbiting.
+      const rings = new Float32Array(BLOOM_COUNT);
       for (let i = 0; i < BLOOM_COUNT; i++) {
         const mode = Math.random();
-        if (mode < 0.65) {
+        if (mode > 0.95) {
+          // Sparse orbs scattered through the volume around the cloud, so the
+          // empty regions read as space with things in it rather than as flat
+          // black. Spherical, not a disc, so they sit at a spread of depths.
+          const u2 = Math.random();
+          const v2 = Math.random();
+          const theta = 2 * Math.PI * u2;
+          const phi = Math.acos(2 * v2 - 1);
+          // The bloom camera flies THROUGH the cloud (z sweeps +-9.6), so a far
+          // field reaching past that gets flown through: orbs sweep the lens
+          // as enormous blobs. Kept inside the turning radius, and faded out
+          // by distance below so approaching one dissolves it instead.
+          const r = 3.4 + Math.pow(Math.random(), 0.7) * 5.6;
+          positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+          positions[i * 3 + 1] = r * Math.cos(phi) * 0.8;
+          positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+          bands[i] = Math.random();
+          seeds[i] = Math.random();
+          sizes[i] = 2.4 + Math.random() * 3.4;
+          depths[i] = 1;
+          rings[i] = 0.3; // background drifts a little, but is not a ring
+          continue;
+        }
+        if (mode < 0.62) {
           const u = Math.random();
           const v = Math.random();
           const theta = 2 * Math.PI * u;
@@ -937,6 +1112,7 @@
           positions[i * 3 + 1] = (Math.random() - 0.5) * 0.35;
           positions[i * 3 + 2] = Math.sin(a) * r;
           bands[i] = Math.min(1, r / 5.5);
+          rings[i] = 1;
         }
         seeds[i] = Math.random();
         sizes[i] = Math.pow(Math.random(), 2.35) * 3.4 + 0.18;
@@ -946,6 +1122,8 @@
       geo.setAttribute("seed", new THREE.BufferAttribute(seeds, 1));
       geo.setAttribute("band", new THREE.BufferAttribute(bands, 1));
       geo.setAttribute("psize", new THREE.BufferAttribute(sizes, 1));
+      geo.setAttribute("depth", new THREE.BufferAttribute(depths, 1));
+      geo.setAttribute("ring", new THREE.BufferAttribute(rings, 1));
       const mat = new THREE.ShaderMaterial({
         uniforms: this.uniforms,
         transparent: true,
@@ -955,6 +1133,8 @@
           attribute float seed;
           attribute float band;
           attribute float psize;
+          attribute float depth;
+          attribute float ring;
           uniform float bass;
           uniform sampler2D bands;
           uniform float bloomSize;
@@ -963,13 +1143,16 @@
           uniform float bloomTight;
           uniform float bloomReact;
           uniform float bloomDance;
+          uniform float bloomSwirlAngle;
           varying float vAlpha;
           varying float vGain;
           varying float vLive;
           varying float vBand;
           varying float vSeed;
           varying float vNearFade;
+          varying float vDepth;
           void main() {
+            vDepth = depth;
             float g = texture2D(bands, vec2(band * 0.97 + 0.015, 0.5)).r;
             g = pow(g, 0.95);
             float live = g * bloomReact;
@@ -979,17 +1162,41 @@
             vBand = band;
             vSeed = seed;
             vec3 pos = position;
-            pos *= mix(1.42, 0.4, bloomTight);
-            pos.y *= mix(1.0, 0.1, bloomShape);
-            pos.xz *= mix(1.0, 1.0 + bloomShape * 0.42, bloomShape);
-            float pulse = 1.0 + motion * bloomSpread * 0.22;
+            // Differential rotation: the outer disc leads the inner shell.
+            // Normalised against the original radius, not the scaled one, so
+            // the profile does not change when bloomTight squeezes the cloud.
+            // One shear per group, NOT a function of radius. Scaling by radius
+            // makes the disc a continuum from the inner speed at its centre to
+            // the outer speed at its rim -- so "outer stopped" only ever stops
+            // the extreme rim. Worse, the accumulated angle is unbounded, so
+            // neighbouring radii diverge without limit and the disc winds into
+            // a spiral until it is azimuthally uniform. A uniform ring of dots
+            // has no visible rotation, which is why it appeared to slow to a
+            // halt over time and never recover.
+            float shear = bloomSwirlAngle * ring;
+            float cs = cos(shear);
+            float sn = sin(shear);
+            // Same handedness as Object3D.rotation.y, which is
+            // [c 0 s / 0 1 0 / -s 0 c]. Rotating the other way makes the shear
+            // SUBTRACT from the object rotation, so the disc's world rate
+            // becomes base*(2*inner - outer): with inner at 2.5 the rings run
+            // fastest at outer 0, look synchronised at 2.5, and stop dead at 5.
+            pos.xz = vec2(pos.x * cs + pos.z * sn, -pos.x * sn + pos.z * cs);
+            // The far field keeps its volume when the cloud flattens or tightens,
+            // which is the whole point of it: depth the main body cannot give.
+            pos *= mix(mix(1.42, 0.4, bloomTight), 1.2, depth);
+            pos.y *= mix(mix(1.0, 0.1, bloomShape), 1.0, depth);
+            pos.xz *= mix(mix(1.0, 1.0 + bloomShape * 0.42, bloomShape), 1.0, depth);
+            float pulse = 1.0 + motion * bloomSpread * 0.22 * mix(1.0, 0.25, depth);
             vec4 mv = modelViewMatrix * vec4(pos * pulse, 1.0);
             gl_Position = projectionMatrix * mv;
             float dist = -mv.z;
             float size = psize * bloomSize * mix(32.0, 52.0, motion);
-            gl_PointSize = min(86.0, size / max(dist * 0.42, 0.65));
-            vNearFade = smoothstep(0.48, 1.8, dist);
-            vAlpha = (0.3 + seed * 0.12 + live * 0.12) * vNearFade;
+            gl_PointSize = min(mix(86.0, 44.0, depth), size / max(dist * 0.42, 0.65));
+            // Far orbs need a much wider near-fade: they are large and soft, so
+            // the camera reaches them long before the main cloud's 1.8 units.
+            vNearFade = mix(smoothstep(0.48, 1.8, dist), smoothstep(1.7, 5.4, dist), depth);
+            vAlpha = (0.3 + seed * 0.12 + live * 0.12) * vNearFade * mix(1.0, 0.42, depth);
           }
         `,
         fragmentShader: `
@@ -1011,13 +1218,16 @@
           varying float vBand;
           varying float vSeed;
           varying float vNearFade;
+          varying float vDepth;
           void main() {
             vec2 p = gl_PointCoord - 0.5;
             float d = length(p);
             if (d > 0.5) discard;
             float edge = 1.0 - smoothstep(0.42, 0.5, d);
-            float halo = exp(-d * d * mix(15.0, 8.5, bloomSoft));
-            float core = exp(-d * d * mix(70.0, 38.0, bloomSoft));
+            // Far orbs get a wider, coreless falloff so they read as soft
+            // out-of-focus bodies rather than as more sparkle.
+            float halo = exp(-d * d * mix(mix(15.0, 8.5, bloomSoft), 5.5, vDepth));
+            float core = exp(-d * d * mix(mix(70.0, 38.0, bloomSoft), 14.0, vDepth));
             float glow = (halo * 0.38 + core * 0.72) * edge;
             float fan = clamp(bloomHue, 0.0, 1.0);
             float slot = fract(vBand * 0.7 + vSeed * fan * 0.95 + vGain * 0.08);
@@ -1032,7 +1242,7 @@
             float spark = mix(1.0, twinkle, bloomSpark * (0.38 + vLive * 0.35));
             float bright =
               bloomBright * (1.08 + vLive * 0.28) * spark *
-              (1.0 + loudness * loudGlow * 0.92);
+              (1.0 + loudness * loudGlow * 0.92) * mix(1.0, 0.5, vDepth);
             float alpha = (halo * 0.22 + core * 0.58) * edge * vAlpha * vNearFade;
             gl_FragColor = vec4(hot * bright * (halo * 0.32 + core * 0.9), alpha);
           }
@@ -1041,6 +1251,311 @@
       this.bloomPoints = new THREE.Points(geo, mat);
       group.add(this.bloomPoints);
       return group;
+    }
+
+    _makeDance() {
+      const group = new THREE.Group();
+      group.visible = false;
+      // Lit rather than additive: these are solid bodies, and the whole point
+      // is reading their silhouettes moving. Key light carries the accent
+      // colour so they still respond to the music.
+      const key = new THREE.DirectionalLight(0xffffff, 2.6);
+      key.position.set(2.5, 4.5, 3);
+      const rim = new THREE.DirectionalLight(0x88aaff, 1.5);
+      rim.position.set(-3, 2, -3.5);
+      const ambient = new THREE.HemisphereLight(0x445577, 0x080810, 0.7);
+      group.add(key, rim, ambient);
+      this.danceKey = key;
+      this.danceRim = rim;
+
+      // Backdrop. Without one the figures float in pure black with nothing to
+      // stand on and no sense of depth or scale.
+      const floor = new THREE.Mesh(
+        new THREE.CircleGeometry(9, 64).rotateX(-Math.PI / 2),
+        new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
+          transparent: true,
+          depthWrite: false,
+          fragmentShader: `
+            uniform vec3 color;
+            uniform vec3 color2;
+            uniform float loudness;
+            uniform float loudGlow;
+            varying vec2 vUv;
+            void main() {
+              vec2 p = vUv * 2.0 - 1.0;
+              float d = length(p);
+              // Concentric rings so the floor reads as a surface rather than a
+              // flat wash, fading out well before the geometry edge.
+              float rings = 0.5 + 0.5 * sin(d * 46.0);
+              float fade = pow(1.0 - clamp(d, 0.0, 1.0), 2.4);
+              vec3 c = mix(color2, color, 0.35 + rings * 0.3);
+              float a = fade * (0.10 + rings * 0.05) * (1.0 + loudness * loudGlow * 0.5);
+              gl_FragColor = vec4(c * (0.5 + rings * 0.5), a);
+            }
+          `,
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+        })
+      );
+      floor.position.y = -0.95;
+      group.add(floor);
+
+      // Sparse haze behind and around them, so the space has depth.
+      const N = 900;
+      const pos = new Float32Array(N * 3);
+      const seed = new Float32Array(N);
+      for (let i = 0; i < N; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = 4 + Math.pow(Math.random(), 0.55) * 16;
+        pos[i * 3] = Math.cos(a) * r;
+        pos[i * 3 + 1] = -0.9 + Math.pow(Math.random(), 1.7) * 9;
+        pos[i * 3 + 2] = Math.sin(a) * r - 3;
+        seed[i] = Math.random();
+      }
+      const hazeGeo = new THREE.BufferGeometry();
+      hazeGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      hazeGeo.setAttribute("seed", new THREE.BufferAttribute(seed, 1));
+      const haze = new THREE.Points(
+        hazeGeo,
+        new THREE.ShaderMaterial({
+          uniforms: this.uniforms,
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          vertexShader: `
+            attribute float seed;
+            uniform float time;
+            uniform float loudness;
+            varying float vSeed;
+            void main() {
+              vSeed = seed;
+              vec3 p = position;
+              p.y += sin(time * (0.12 + seed * 0.2) + seed * 30.0) * 0.5;
+              vec4 mv = modelViewMatrix * vec4(p, 1.0);
+              gl_Position = projectionMatrix * mv;
+              gl_PointSize = (5.0 + seed * 26.0) / max(-mv.z * 0.16, 0.5);
+            }
+          `,
+          fragmentShader: `
+            uniform vec3 color;
+            uniform vec3 color2;
+            uniform float loudness;
+            uniform float loudGlow;
+            varying float vSeed;
+            void main() {
+              float d = length(gl_PointCoord - 0.5);
+              if (d > 0.5) discard;
+              float g = exp(-d * d * 9.0) * (1.0 - smoothstep(0.42, 0.5, d));
+              vec3 c = mix(color2, color, vSeed);
+              float a = g * (0.05 + vSeed * 0.05) * (1.0 + loudness * loudGlow * 0.6);
+              gl_FragColor = vec4(c * 0.9, a);
+            }
+          `,
+        })
+      );
+      haze.frustumCulled = false;
+      group.add(haze);
+      this.danceHaze = haze;
+
+      this.danceState = null;
+      return group;
+    }
+
+    /**
+     * Loads the shared rig once, then clones it per dancer. SkeletonUtils.clone
+     * is required rather than Object3D.clone: the latter copies the meshes but
+     * leaves them bound to the ORIGINAL skeleton, so every clone would move in
+     * lockstep with the first.
+     */
+    _loadDancers() {
+      if (this.danceState || this._danceLoading) return;
+      const Loader = THREE.GLTFLoader;
+      if (!Loader || !THREE.SkeletonUtils) {
+        if (!this._warnedNoGltf) {
+          this._warnedNoGltf = true;
+          console.warn("Soundstage: three-addons.js not loaded; dance mode unavailable");
+        }
+        return;
+      }
+      // file:// blocks fetch() of local assets, so the page loads but the model
+      // never arrives. Say so plainly instead of surfacing a bare CORS error --
+      // every other mode works from file://, so this is a surprising failure.
+      if (!this.options.assetUrl && location.protocol === "file:") {
+        if (!this._warnedFileProtocol) {
+          this._warnedFileProtocol = true;
+          console.warn(
+            "Soundstage: dance mode needs the lab served over http, not opened as a file.\n" +
+              "  cd " + (location.pathname.replace(/\/[^/]*$/, "") || ".") + "\n" +
+              "  python3 -m http.server 8765\n" +
+              "  open http://127.0.0.1:8765/preview.html?mode=dance"
+          );
+        }
+        return;
+      }
+      this._danceLoading = true;
+      const url = this.options.assetUrl
+        ? this.options.assetUrl("src/assets/RobotExpressive.glb")
+        : "src/assets/RobotExpressive.glb";
+      new Loader().load(
+        url,
+        (gltf) => {
+          this._danceLoading = false;
+          const clips = Object.fromEntries(gltf.animations.map((c) => [c.name, c]));
+          // Derive the layout from the rig's real bounds. The model is ~6 units
+          // tall and its origin sits ~0.93 above the soles, so hardcoding a
+          // scale or a y offset puts the figures through the floor or out of
+          // frame.
+          gltf.scene.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(gltf.scene);
+          const size = new THREE.Vector3();
+          box.getSize(size);
+          const unit = Math.max(0.001, size.y);
+          const footDrop = -box.min.y / unit; // soles, as a fraction of height
+          const GROUND = -0.95;
+          const dancers = [];
+          for (let i = 0; i < DANCERS; i++) {
+            const root = THREE.SkeletonUtils.clone(gltf.scene);
+            const a = (i / DANCERS) * Math.PI * 2;
+            const ring = i === 0 ? 0 : 1.75 + (i % 2) * 0.42;
+            const height = i === 0 ? 1.6 : 1.08 + (i % 3) * 0.1;
+            const scale = height / unit;
+            root.position.set(
+              Math.sin(a) * ring,
+              GROUND + footDrop * height,
+              Math.cos(a) * ring * 0.72 - 0.35
+            );
+            // Face the camera, with a little splay so it is not a lineup.
+            // The previous `-a + PI` turned everyone's back to the viewer.
+            root.rotation.y = Math.sin(a) * 0.45;
+            root.scale.setScalar(scale);
+            root.traverse((o) => {
+              if (o.isMesh) {
+                o.castShadow = false;
+                o.receiveShadow = false;
+                // Skinned meshes carry bind-pose bounding volumes, and this rig
+                // hangs its mesh under an armature scaled 100x -- so the culler
+                // computes bounds that have nothing to do with where the figure
+                // actually is and drops every dancer. Standard for characters.
+                o.frustumCulled = false;
+                if (o.material) o.material = o.material.clone();
+              }
+            });
+            const mixer = new THREE.AnimationMixer(root);
+            const danceClip = clips.Dance || gltf.animations[0];
+            const action = mixer.clipAction(danceClip);
+            action.play();
+            action.paused = true;
+            action.setEffectiveWeight(0);
+            // Rest pose until a downbeat latches the crew onto the grid.
+            const idle = clips.Idle ? mixer.clipAction(clips.Idle) : null;
+            if (idle) {
+              idle.play();
+              idle.setEffectiveWeight(1);
+            }
+            // Variety without more clips: spread them across the 8-beat phrase
+            // so they are on different steps of the same move, and mirror
+            // every other one. Rate is shared; half-time desyncs the crew.
+            const beatOffset = [0, 4, 2, 6, 1, 5, 3][i % 7];
+            if (i % 2 === 1) root.scale.x *= -1;
+            dancers.push({
+              root, mixer, action, idle,
+              baseScale: scale, baseY: root.position.y,
+              beatOffset, mix: 0, accent: null, accentUntil: 0,
+            });
+            this.dance.add(root);
+          }
+          this.danceState = {
+            clips, dancers,
+            clipDuration: (clips.Dance || gltf.animations[0]).duration,
+            latched: false, nextAccent: 0, turn: 0,
+          };
+        },
+        undefined,
+        (err) => {
+          this._danceLoading = false;
+          console.warn(`Soundstage: dance model failed to load from ${url}`, err);
+        }
+      );
+    }
+
+    _tickDance(dt) {
+      const st = this.danceState;
+      if (!st) return;
+      const m = this.motion;
+      const step = Math.min(dt, 0.1);
+      const [r, g, b] = this.liveAccent;
+      const now = this.elapsed;
+      const period = this.bpm > 0 ? 60 / this.bpm : 0;
+      const locked = m.gridMix > 0.35 && period > 0 && m.live > 0.45;
+      const clipBeat = st.clipDuration / DANCE_CLIP_BEATS;
+
+      if (this.danceKey) {
+        this.danceKey.intensity = 1.9 + m.loudness * 1.2;
+        this.danceKey.color.setRGB(
+          0.55 + (r / 255) * 0.45,
+          0.55 + (g / 255) * 0.45,
+          0.55 + (b / 255) * 0.45
+        );
+      }
+      if (this.danceRim) this.danceRim.intensity = 0.9 + m.loudness * 0.7;
+
+      // Motion is latched on the downbeat, then left alone. Per-frame phase
+      // locking, BPM-chasing timeScale, and kick/accent bounces are what made
+      // the footwork skittish -- every tempo nudge and onset became a twitch.
+      if (!locked) st.latched = false;
+      if (this.downbeatHit && locked) {
+        const rate = clipBeat / period;
+        const beatsBase = (this.barIndex * 4) % DANCE_CLIP_BEATS;
+        for (const d of st.dancers) {
+          d.action.paused = false;
+          d.action.timeScale = rate;
+          d.action.time =
+            (((beatsBase + d.beatOffset) % DANCE_CLIP_BEATS) / DANCE_CLIP_BEATS) *
+            st.clipDuration;
+        }
+        st.latched = true;
+
+        if (now > st.nextAccent && DANCE_ACCENTS.length) {
+          const d = st.dancers[st.turn % st.dancers.length];
+          st.turn++;
+          const name = DANCE_ACCENTS[(st.turn * 3) % DANCE_ACCENTS.length];
+          const clip = st.clips?.[name];
+          if (clip && !d.accent) {
+            const act = d.mixer.clipAction(clip);
+            act.reset();
+            act.setLoop(THREE.LoopOnce, 1);
+            act.clampWhenFinished = true;
+            act.timeScale = rate;
+            act.play();
+            d.accent = act;
+            d.accentUntil = now + (clip.duration / Math.max(0.2, rate)) * 0.92;
+          }
+          st.nextAccent = now + period * 8;
+        }
+      }
+
+      const dancing = st.latched && locked ? 1 : 0;
+      for (const d of st.dancers) {
+        if (d.accent && now > d.accentUntil) {
+          d.accent.fadeOut(0.25);
+          d.accent = null;
+        }
+        d.mix += (dancing - d.mix) * (1 - Math.exp(-step / (dancing ? 0.12 : 0.28)));
+        const accentWeight = d.accent ? 1 : 0;
+        d.action.setEffectiveWeight(d.mix * (1 - accentWeight));
+        if (d.idle) d.idle.setEffectiveWeight((1 - d.mix) * (1 - accentWeight));
+        if (d.accent) d.accent.setEffectiveWeight(1);
+        if (!st.latched) d.action.paused = true;
+        d.root.scale.setScalar(d.baseScale);
+        d.root.position.y = d.baseY;
+        d.mixer.update(step);
+      }
     }
 
     _magRandom() {
@@ -1077,7 +1592,6 @@
         pulse: 0,
         pulseTarget: 0,
         yaw: 0.35,
-        prevKick: 0,
         preset: -1,
         trailAcc: 0,
         simAcc: 0,
@@ -1610,15 +2124,42 @@
 
     _tick(dt) {
       this._updatePerformance(dt);
-      this._analyse();
+      this._analyse(dt);
+      // Drain onsets that fired since the last render.
+      const pending = this._pendingHit;
+      this.hit.low = pending.low;
+      this.hit.mid = pending.mid;
+      this.hit.high = pending.high;
+      pending.low = pending.mid = pending.high = 0;
+      this.beatHit = this._pendingBeat;
+      this.downbeatHit = this._pendingDownbeat;
+      this._pendingBeat = false;
+      this._pendingDownbeat = false;
+      // The beat clock only runs on the analysis clock, so extrapolate phase
+      // to the render instant. Without this the primary motion quantises to
+      // the hop grid and re-introduces exactly the stutter P0 removed.
+      // Only extrapolate while the clock is actually locked. Free-running the
+      // phase against a stale bpm keeps manufacturing beats after playback has
+      // stopped, which is the visuals bouncing to nothing.
+      if (this.engineDriven && this.beatLocked && this.bpm > 0) {
+        const period = 60 / this.bpm;
+        this.beatPhase += dt / period;
+        while (this.beatPhase >= 1) this.beatPhase -= 1;
+        this.barPhase += dt / (period * 4);
+        while (this.barPhase >= 1) this.barPhase -= 1;
+        this.phrasePhase += dt / (period * 32);
+        while (this.phrasePhase >= 1) this.phrasePhase -= 1;
+        this.timeToNextBeat = Math.max(0, this.timeToNextBeat - dt);
+      }
       this.elapsed += dt;
       this._updateLiveColor();
       if (this.uniforms) {
         this.uniforms.time.value = this.elapsed;
         this.uniforms.audioLevel.value = this.energy;
-        this.uniforms.loudness.value = this.loudness;
+        this.uniforms.loudness.value = this.motion.loudness;
         this.uniforms.bass.value = this.smoothBass;
       }
+      this._updateMotion(dt);
       if (this.mode === "pulse" || this.mode === "bloom" || this.mode === "magnetosphere") {
         this._updateBands(dt);
       }
@@ -1626,6 +2167,7 @@
       if (this.mode === "ridge") this._tickRidge(dt);
       if (this.mode === "bloom") this._tickBloom(dt);
       if (this.mode === "magnetosphere") this._tickMagnetosphere(dt);
+      if (this.mode === "dance") this._tickDance(dt);
       this._updateCamera(dt);
       if (this.mode === "pulse") this._updatePulseArtwork();
       if (this.renderer) {
@@ -1634,19 +2176,23 @@
           const preset = Math.max(0, this.mag?.preset || 0);
           const bloom = [1.32, 1.08, 0.92, 1.24][preset] || 1.18;
           const exposure = [1.08, 0.98, 1.04, 1.12][preset] || 1.05;
-          const loudBoost = this.loudness * this.params.loudGlow;
+          const loudBoost = this.motion.loudness * this.params.loudGlow;
           this.uniforms.magReflectionTex.value = this.magPost.reflectionTarget?.texture || null;
           this.magPost.render(this.scene, this.camera, {
             time: this.elapsed,
             threshold: preset === 2 ? 0.9 : 0.72,
             knee: 0.46,
             bloomStrength:
-              (bloom + this.kick * 0.16) * this.params.magBloom * (1 + loudBoost * 0.52),
-            exposure: exposure + this.energy * 0.08 + loudBoost * 0.18,
+              (bloom + this.motion.accent * 0.20) * this.params.magBloom * (1 + loudBoost * 0.52),
+            exposure:
+              exposure + this.energy * 0.06 + this.motion.accent * 0.05 + loudBoost * 0.18,
             saturation: preset === 2 ? 1.02 : 1.12,
-            fineRadius: 1.15,
-            mediumRadius: preset === 3 ? 3.1 : 2.65,
-            veilRadius: preset === 2 ? 3.5 : 4.2,
+            // Kernel radii, not blur widths: width comes from how far down the
+            // mip pyramid each band is taken. Anything much past 1.5 starts
+            // undersampling the kernel again.
+            fineRadius: 1.1,
+            mediumRadius: preset === 3 ? 1.35 : 1.15,
+            veilRadius: preset === 2 ? 1.2 : 1.4,
             voidLayer: MAG_VOID_LAYER,
           });
         } else {
@@ -1655,6 +2201,167 @@
         }
       }
       this._drawWaveform();
+      this.onRender?.(dt);
+    }
+
+    _initMotion() {
+      const M = globalThis.ScvizMotion;
+      if (!M) {
+        if (!this._warnedNoMotion) {
+          this._warnedNoMotion = true;
+          console.warn("Soundstage: motion.js not loaded; visuals stay level-driven");
+        }
+        return null;
+      }
+      if (!this._springs) {
+        this._springs = {
+          // Frequencies set the character: a kick should bloom and settle, a
+          // hat should tick. Damping under 1 gives the overshoot that reads as
+          // follow-through.
+          kick: new M.Spring(3.0, 0.52),
+          snare: new M.Spring(5.5, 0.7),
+          hat: new M.Spring(9.5, 0.85),
+          spin: new M.Spring(0.9, 0.72),
+          downbeat: new M.Spring(1.5, 0.6),
+        };
+        // Slow both ways on purpose: the grid crossfade must never flicker,
+        // or the whole scene changes character mid-phrase.
+        this._gridMixEnv = new M.Envelope(1.2, 3.0);
+        this._activityEnv = new M.Envelope(0.3, 2.6);
+        this._beatEnv = new M.Envelope(0.005, 0.12);
+        // Quick to trust, quick to drop.
+        this._liveEnv = new M.Envelope(0.12, 0.22);
+      }
+      return M;
+    }
+
+    /**
+     * Turn the analysis into motion, once per frame, before any mode runs.
+     *
+     * `gridMix` crossfades between reactive envelopes and the beat grid, so
+     * material the clock cannot track degrades to the old behaviour instead of
+     * looking wrong. Bar and phrase arcs additionally require the downbeat to
+     * be trustworthy -- on four-on-the-floor it usually is not, and a bar
+     * accent placed on the wrong beat is worse than none.
+     */
+    _updateMotion(dt) {
+      const M = this._initMotion();
+      const m = this.motion;
+      if (!M) {
+        m.loudness = this.loudness;
+        m.live = 1;
+        return;
+      }
+      const sp = this._springs;
+      const step = dt > 0 ? Math.min(dt, 0.1) : 1 / 60;
+
+      // Is there audio at all? The beat clock's phase free-runs by design, so
+      // without an explicit signal gate a pause leaves the grid firing beats
+      // into silence for as long as the confidence crossfade takes to release
+      // -- several seconds of bouncing with nothing playing.
+      m.live = this._liveEnv.push(M.smoothstep(0.012, 0.05, this.loudness), step);
+      const grid = this.engineDriven ? M.smoothstep(0.35, 0.7, this.beatConfidence) : 0;
+      m.gridMix = this._gridMixEnv.push(grid, step) * m.live;
+      const barTrust = m.gridMix * M.smoothstep(0.15, 0.5, this.downbeatConfidence);
+
+      // Amplitude comes from the onset envelope, timing from `hit`: a hit's
+      // own strength under-reads when an attack straddles an analysis hop.
+      const lowAmp = Math.max(this.hit.low, this.onset.low);
+      if (this.hit.low > 0) {
+        // Weight by surprisal so the fortieth kick of a section does not get
+        // the same shove as the first one after a breakdown.
+        const bite = 0.55 + 0.45 * Math.min(1.8, this.surprise.low);
+        sp.kick.impulse(3.6 * lowAmp * bite);
+      }
+      if (this.hit.mid > 0) sp.snare.impulse(4.0 * Math.max(this.hit.mid, this.onset.mid));
+      if (this.hit.high > 0) sp.hat.impulse(3.2 * Math.max(this.hit.high, this.onset.high));
+
+      if (this.beatHit) {
+        m.beatAmp += (Math.max(0.3, lowAmp) - m.beatAmp) * 0.35;
+        sp.spin.impulse(0.7 * (0.4 + 0.6 * m.beatAmp) * m.gridMix);
+      } else if (this.hit.low > 0) {
+        sp.spin.impulse(0.5 * lowAmp * (1 - m.gridMix));
+      }
+      if (this.downbeatHit) sp.downbeat.impulse(2.4 * barTrust);
+
+      // Sensitivity applies once, here, so it reaches every mode. It used to
+      // be read only by _tickRidge and _tickBloom, which meant the slider did
+      // nothing at all in pulse, magnetosphere or dance. At 1.0 this is the
+      // identity, so nothing is retuned; those two modes simply weight it
+      // twice at the extremes, which is the direction you would want anyway.
+      const sens = clamp(this.params.sensitivity ?? 1, 0, 2.2);
+      m.sensitivity = sens;
+
+      m.kick = sp.kick.update(step) * sens;
+      m.snare = sp.snare.update(step) * sens;
+      m.hat = sp.hat.update(step) * sens;
+      m.spin = sp.spin.update(step);
+      m.downbeat = sp.downbeat.update(step);
+
+      // The primary pulse: an anticipation swell that arrives ON the beat,
+      // plus the hit itself as a triggered envelope.
+      //
+      // The hit deliberately is NOT a peak in a curve over phase. Such a peak
+      // is sampled wherever the frame happens to fall, so the identical beat
+      // renders at 0.66 on a 30 fps machine and 0.85 on a 90 fps one. A held
+      // envelope presents its full height on whichever frame the beat lands.
+      // Decay before triggering, or slow frames shave the top off.
+      const period = this.bpm > 0 ? 60 / this.bpm : 0.5;
+      this._beatEnv.release = Math.max(0.05, period * 0.2);
+      this._beatEnv.decay(step);
+      // Fire on the frame NEAREST the beat, not the first one after it.
+      // Detecting the plain wrap makes every hit up to a whole frame late, so
+      // a 30 fps machine sits a systematic ~16 ms behind a 90 fps one -- the
+      // same lateness this whole design exists to remove, reintroduced at the
+      // very last step. Advancing the phase by half a frame before looking for
+      // the wrap centres the error at zero instead.
+      let shifted = this.beatPhase + step / (2 * period);
+      shifted -= Math.floor(shifted);
+      const fire = this._prevShifted !== undefined && shifted < this._prevShifted;
+      this._prevShifted = shifted;
+      const beatSize = 0.55 + 0.45 * m.beatAmp;
+      if (fire && m.gridMix > 0.02) this._beatEnv.trigger(beatSize);
+
+      // Swelling into a beat that nothing supports feels arbitrary -- the
+      // anticipation is a promise, and it should not be made when onsets have
+      // stopped arriving. Fades out between roughly one and three beats of
+      // silence from the kick stream.
+      const beatMs = period * 1000;
+      const supported = M.smoothstep(2.6 * beatMs, 0.9 * beatMs, this.since.low);
+      const swell = M.swell(this.beatPhase, 0.28) * 0.46 * beatSize * supported;
+      const gridAccent = Math.max(swell, this._beatEnv.value);
+      m.accent = (this.kick + (gridAccent - this.kick) * m.gridMix) * m.live * sens;
+      m.anticipation = m.gridMix * M.swell(this.beatPhase, 0.28) * supported;
+
+      m.bar = M.archShape(this.barPhase, 2.2) * barTrust;
+      m.phrase = M.archShape(this.phrasePhase, 2.4) * barTrust;
+
+      // Stillness budget: sync is only legible against things that are not
+      // moving, so ornament motion backs off when the music is busy.
+      const busy = Math.max(this.onset.low, this.onset.mid, this.onset.high, this.loudness * 0.8);
+      m.calm = 1 - Math.min(1, this._activityEnv.push(busy, step));
+
+      // Loudness re-scaled against the range it has actually occupied over the
+      // last several seconds.
+      //
+      // The raw signal is AGC-normalised RMS, so on real music it parks near a
+      // constant -- which turns every `1.0 + loudness * loudGlow` term in the
+      // shaders into a fixed brightness offset instead of a response. The
+      // colour just sits brighter and never moves. Tracking a decaying peak
+      // and valley recovers whatever dynamics the passage actually has.
+      const L = this.loudness;
+      const settle = Math.exp(-step / BEAT_LOUD_MEMORY);
+      this._loudMax = Math.max(L, (this._loudMax ?? L) * settle + L * (1 - settle));
+      this._loudMin = Math.min(L, (this._loudMin ?? L) * settle + L * (1 - settle));
+      const range = this._loudMax - this._loudMin;
+      const norm = M.clamp((L - this._loudMin) / Math.max(range, 1e-4), 0, 1);
+      // A genuinely steady passage has no dynamics to expand; sit mid-scale
+      // rather than amplifying noise into a flicker.
+      const trust = M.smoothstep(0.03, 0.12, range);
+      const dyn = 0.45 + (norm - 0.45) * trust;
+      // Centred near where the old constant sat, so the average look is kept
+      // and what changes is how far it swings.
+      m.loudness = M.clamp(0.15 + dyn * 0.75, 0, 1.2);
     }
 
     _syncPulseArt() {
@@ -1664,18 +2371,29 @@
     }
 
     _tickPulse(dt) {
-      const spin = 0.12 + this.smoothBass * 0.55;
-      this.pulse.rotation.y += dt * spin;
+      const m = this.motion || {};
+      const loud = Number.isFinite(m.loudness) ? m.loudness : (this.loudness || 0);
+      const glow = loud * (this.params.loudGlow ?? 1);
+      // Loudness is the body of the track. Kick/snare springs and the beat
+      // accent made this orb jump on every onset -- the look before that
+      // round, minus putting bass into spin rate (which drifted forever).
+      this._pulseSpin = (this._pulseSpin || 0) + dt * 0.12;
+      this.pulse.rotation.y = this._pulseSpin;
       this.pulse.rotation.x = Math.sin(this.elapsed * 0.35) * 0.12;
-      const s = 1 + this.kick * 0.08 + this.smoothBass * 0.05;
-      this.pulse.scale.setScalar(s);
+      this.pulse.scale.setScalar(1 + loud * 0.12 + glow * 0.04);
+      // Shared uniforms otherwise carry hop-rate energy/bass, which wriggles
+      // the wireframe every analysis frame. Loudness is already smoothed.
+      if (this.uniforms) {
+        this.uniforms.audioLevel.value = loud;
+        this.uniforms.bass.value = loud;
+      }
       this._syncPulseArt();
       if (this.artMesh) {
-        const targetScale =
-          1 + this.smoothBass * 0.075 + this.kick * 0.12 + this.loudness * this.params.loudGlow * 0.035;
-        this._artScale = (this._artScale ?? 1) + (targetScale - (this._artScale ?? 1)) * 0.16;
+        const targetScale = 1 + loud * 0.10 + glow * 0.04;
+        const k = 1 - Math.exp(-Math.max(0, dt) / 0.09);
+        this._artScale = (this._artScale ?? 1) + (targetScale - (this._artScale ?? 1)) * k;
         this.artMesh.scale.setScalar(this._artScale);
-        this.artMat.opacity = 0.48 + Math.min(0.13, this.loudness * this.params.loudGlow * 0.09);
+        this.artMat.opacity = 0.48 + Math.min(0.13, glow * 0.09);
       }
       if (this.pulseDust) this.pulseDust.rotation.y -= dt * 0.04;
     }
@@ -1703,14 +2421,23 @@
       const mark = this.ridgeMark;
       const [r, g, b] = this.liveAccent;
       const fuzz = clamp(this.params.ridgeFuzz ?? 0.28, 0, 1);
-      const loudBright = 1 + this.loudness * this.params.loudGlow * 0.55;
+      const loudBright = 1 + this.motion.loudness * this.params.loudGlow * 0.55;
       const freq = this.params.ridgeFreq ?? 1;
       const step = Math.max(1, Math.round(1 + (1 - freq) * 5));
       this._ridgeStep = step;
+      // Lock the scroll rate to the beat, and re-anchor the accumulator on each
+      // beat so rows stay phase-aligned rather than merely the right speed.
+      const m = this.motion;
+      let stepSecs = RIDGE_STEP;
+      if (m.gridMix > 0.02 && this.bpm > 0) {
+        const perBeat = 60 / this.bpm / RIDGE_ROWS_PER_BEAT;
+        stepSecs = RIDGE_STEP + (perBeat - RIDGE_STEP) * m.gridMix;
+      }
+      if (this.beatHit && m.gridMix > 0.5) this.ridgeAcc = 0;
       this.ridgeAcc += dt;
       let shifted = false;
-      while (this.ridgeAcc >= RIDGE_STEP) {
-        this.ridgeAcc -= RIDGE_STEP;
+      while (this.ridgeAcc >= stepSecs) {
+        this.ridgeAcc -= stepSecs;
         shifted = true;
         this._ridgeShiftCount++;
         if (this._ridgeShiftCount % step !== 0) mark[0] = 0;
@@ -1728,7 +2455,7 @@
       for (let c = 0; c < RIDGE_COLS; c++) {
         const raw = this._bandMag(c / (RIDGE_COLS - 1));
         const hgt =
-          raw * (1.75 + react * 0.3 + this.kick * 0.4 * react) * this.params.ridgeHeight;
+          raw * (1.75 + react * 0.3 + m.accent * 0.42 * react) * this.params.ridgeHeight;
         arr[c * 3 + 1] = hgt;
       }
       mark[0] = 1;
@@ -1820,6 +2547,21 @@
     _tickMagnetosphere(dt) {
       const mag = this.mag;
       if (!mag) return;
+      // Core size breathes rather than sitting at whatever the knob says. Two
+      // incommensurate LFOs so it never settles into an audible loop, plus a
+      // phrase-scale term when the clock is confident -- the form should move
+      // with the music's structure, not only with a timer. Computed before the
+      // fixed-step gate below so it tracks wall time even on skipped steps.
+      const ct = this.elapsed;
+      const cm = this.motion;
+      const coreLfo =
+        1 + Math.sin(ct * 0.117 + 0.7) * 0.10 + Math.sin(ct * 0.041 + 2.3) * 0.06;
+      const corePhrase = 1 + (cm.phrase - 0.5) * 0.12 * cm.gridMix;
+      this.magCoreScale = clamp(
+        (this.params.magCoreSize ?? 1) * coreLfo * corePhrase,
+        0.45,
+        1.95
+      );
       mag.simAcc = Math.min(MAG_SIM_STEP * 2, mag.simAcc + Math.min(0.05, dt));
       if (mag.simAcc + 1e-6 < MAG_SIM_STEP) return;
       mag.simAcc -= MAG_SIM_STEP;
@@ -1834,15 +2576,17 @@
       const simStep = this.magOptions.freeze ? 0 : step * this.params.magMotion;
       mag.simulationTime += simStep;
       const simT = mag.simulationTime;
-      const kickRise = Math.max(0, this.kick - mag.prevKick);
-      mag.pulseTarget = Math.max(
-        kickRise * 2.4,
-        mag.pulseTarget * Math.exp(-step * 9.5)
-      );
+      // Driven by the kick spring and the downbeat, plus the anticipation ramp
+      // so the field starts to bloom before the beat rather than after it.
+      const mo = this.motion;
+      const drive = Math.max(0, mo.kick) * 0.55 + mo.downbeat * 0.30 + mo.anticipation * 0.12;
+      // Shared with _stepMagnetosphere, which charges each orb from the same
+      // impulse rather than from a level derivative of its own.
+      mag.drive = drive;
+      mag.pulseTarget = Math.max(drive, mag.pulseTarget * Math.exp(-step * 9.5));
       const pulseRate = mag.pulseTarget > mag.pulse ? 28 : 7;
       mag.pulse +=
         (mag.pulseTarget - mag.pulse) * (1 - Math.exp(-step * pulseRate));
-      mag.prevKick = this.kick;
       this.magReflectivity = clamp(this.params.magReflect, 0, 1);
       this.uniforms.magReflectivity.value = this.magReflectivity;
       const densityWave =
@@ -1922,7 +2666,7 @@
           (bandTarget - orb.bandSmooth) * (1 - Math.exp(-step * bandRate));
         const band = orb.bandSmooth;
         orb.kickEnvelope = Math.max(
-          kickRise,
+          mag.drive || 0,
           orb.kickEnvelope * Math.exp(-step * 11)
         );
         const targetCharge = orb.charge * (0.68 + band * 0.78 + mag.pulse * 0.24);
@@ -1972,7 +2716,7 @@
           orb.p.addScaledVector(orb.v, simStep);
         }
         const scaleTarget =
-          orb.scale * this.params.magCoreSize * (0.9 + band * 0.24 + mag.pulse * 0.11);
+          orb.scale * this.magCoreScale * (0.9 + band * 0.24 + mag.pulse * 0.11);
         const scaleRate = scaleTarget > orb.visualScale ? 20 : 7.5;
         orb.visualScale +=
           (scaleTarget - orb.visualScale) * (1 - Math.exp(-step * scaleRate));
@@ -2146,7 +2890,7 @@
       const rr = Math.sqrt(Math.max(0, 1 - z * z));
       mag.radial.set(Math.cos(a) * rr, z, Math.sin(a) * rr);
       const shell =
-        0.42 + home.scale * this.params.magCoreSize * (0.38 + this._magRandom() * 0.46);
+        0.42 + home.scale * this.magCoreScale * (0.38 + this._magRandom() * 0.46);
       particle.p.copy(home.p).addScaledVector(mag.radial, shell);
       mag.axis.set(0.12 + Math.sin(a * 0.7), 1, 0.18 + Math.cos(a * 0.9)).normalize();
       mag.tangent.crossVectors(mag.radial, mag.axis);
@@ -2289,7 +3033,7 @@
         p.p.addScaledVector(p.v, dt * (0.9 + live * 0.3));
 
         if (nearest && p.impactCooldown <= 0) {
-          const radius = 0.64 * nearest.scale * this.params.magCoreSize + 0.09;
+          const radius = 0.64 * nearest.scale * this.magCoreScale + 0.09;
           const rawD2 = Math.max(0, nearestD2 - 0.24);
           if (rawD2 < radius * radius) {
             mag.radial.subVectors(p.p, nearest.p);
@@ -2298,7 +3042,25 @@
             const inward = p.v.dot(mag.radial);
             if (inward < 0) p.v.addScaledVector(mag.radial, -1.75 * inward);
             p.v.addScaledVector(mag.radial, 0.35 + live * 0.75);
+            const preX = p.p.x;
+            const preY = p.p.y;
+            const preZ = p.p.z;
             p.p.copy(nearest.p).addScaledVector(mag.radial, radius + 0.025);
+            // Pushing the particle out of the orb is a positional correction,
+            // not travel. The stored trail has to move with it, or the next
+            // sample joins the pre-impact position to the corrected one and
+            // draws a segment along the orb radial -- roughly perpendicular to
+            // the direction of travel, which reads as a spike off the trail.
+            const shiftX = p.p.x - preX;
+            const shiftY = p.p.y - preY;
+            const shiftZ = p.p.z - preZ;
+            const hist = p.trail;
+            for (let s = 0; s < MAG_TRAIL; s++) {
+              const o = s * 3;
+              hist[o] += shiftX;
+              hist[o + 1] += shiftY;
+              hist[o + 2] += shiftZ;
+            }
             p.home = (p.home + 1 + ((p.seed * 17) | 0)) % mag.orbs.length;
             p.impactCooldown = 0.42;
             if (densityLife > 0.15) this._triggerMagImpact(p, live);
@@ -2561,8 +3323,12 @@
       const react = Math.min(1.12, s);
       const drift = (speed, amt, phase) => Math.sin(t * speed + phase) * amt;
       const u = this.uniforms;
+      // Accent rather than kick: under the grid it swells INTO the beat, so
+      // the nebula is already opening when the kick lands instead of starting
+      // to open once it has.
+      const m = this.motion;
       const danceTarget = clamp(
-        (this.rawSmoothBass * 0.52 + this.kick * 0.62 + this.energy * 0.18) * react,
+        (this.rawSmoothBass * 0.34 + m.accent * 0.74 + m.kick * 0.10 + this.energy * 0.16) * react,
         0,
         1.2
       );
@@ -2574,8 +3340,15 @@
         if (u.bloomReact) u.bloomReact.value = react;
         if (u.bloomDance) u.bloomDance.value = this.bloomDance;
         if (u.bloomShape) {
+          // The old drift was +-0.105 but on 150 s and 370 s periods, which is
+          // far too slow to read as movement at all. The fix is mostly rate,
+          // not amount: the leading term now cycles in ~70 s. bloomShape
+          // flattens the nebula into a disc, so a little goes a long way.
           u.bloomShape.value = clamp(
-            p.bloomShape + drift(0.041, 0.07, 0.3) + drift(0.017, 0.035, 1.7),
+            p.bloomShape +
+              drift(0.09, 0.085, 0.3) +
+              drift(0.032, 0.05, 1.7) +
+              (m.phrase - 0.5) * 0.05 * m.gridMix,
             0,
             1
           );
@@ -2598,9 +3371,21 @@
         0.48,
         1.18
       );
-      const spin = (p.bloomSpin ?? 1) * spinFlow;
       this.bloomReact = react;
-      this.bloom.rotation.y += dt * (0.09 + this.rawSmoothBass * 0.18 * react) * spin;
+      // Inner spin is exactly the original expression -- same base rate, same
+      // flow, same accumulation, and no beat impulse on the angle. The beat
+      // nudge made the whole disc lurch once a bar, which combined with the
+      // fly-through camera read as the camera itself misbehaving.
+      const baseRate = (0.09 + this.rawSmoothBass * 0.18 * react) * spinFlow;
+      const innerSpin = p.bloomSpin ?? 1;
+      const outerSpin = p.bloomSwirl ?? 1.5;
+      this.bloom.rotation.y += dt * baseRate * innerSpin;
+      // Outer spin is the SAME scale as inner: at equal values the cloud turns
+      // rigidly, 0 leaves the rings standing still, and anything above the
+      // inner value makes them lead. The object rotation already carries the
+      // inner speed, so only the difference is sheared in.
+      this._bloomSwirl = (this._bloomSwirl || 0) + dt * baseRate * (outerSpin - innerSpin);
+      if (u && u.bloomSwirlAngle) u.bloomSwirlAngle.value = this._bloomSwirl;
       this.bloom.rotation.x =
         0.08 + Math.sin(t * 0.071 + 0.6) * 0.24 + Math.sin(t * 0.023) * 0.08;
       this.bloom.rotation.z =
@@ -2624,7 +3409,7 @@
         const target = Math.min(1, mag);
         const current = data[o] / 255;
         const rate = target > current ? 28 : 9;
-        const smooth = this.mode === "bloom"
+        const smooth = this.mode === "bloom" || this.mode === "pulse"
           ? current + (target - current) * (1 - Math.exp(-step * rate))
           : target;
         const v = Math.min(255, smooth * 255);
@@ -2647,7 +3432,10 @@
       const u = (zoom - 2.2) / 1.3;
       let magnetosphereCam = [0, 0.85, 4.8];
       if (this.mode === "magnetosphere" && this.mag) {
-        this.mag.yaw += dt * (0.026 + this.energy * 0.012);
+        // Level into angular velocity again: a busy passage used to spin the
+        // camera faster and faster. Base rate plus a phrase-scale term, so the
+        // camera moves with the form rather than with the loudness.
+        this.mag.yaw += dt * (0.026 + 0.010 * this.motion.calm + this.motion.phrase * 0.012);
         const travel = 0.5 + 0.5 * Math.sin(this.elapsed * 0.019 - 0.8);
         const presetPull = [0, 1.65, 0.35, 1.05][Math.max(0, this.mag.preset)] || 0;
         const rad = Math.max(3.35, 7.35 - travel * 2.15 - presetPull - this.kick * 0.18);
@@ -2663,7 +3451,8 @@
       const bloomThrough = Math.pow(1 - Math.min(1, Math.abs(bloomSide)), 0.72);
       const targetFov = this.mode === "magnetosphere"
         ? [58, 52, 62, 66][Math.max(0, this.mag?.preset || 0)]
-        : this.mode === "bloom" ? 63 + bloomThrough * 10 : 60;
+        : this.mode === "bloom" ? 63 + bloomThrough * 10
+        : this.mode === "dance" ? 52 : 60;
       const nextFov = this.camera.fov + (targetFov - this.camera.fov) * Math.min(1, dt * 0.7);
       if (Math.abs(nextFov - this.camera.fov) > 0.001) {
         this.camera.fov = nextFov;
@@ -2675,8 +3464,17 @@
         0.55 + Math.sin(bloomFlight * 1.7 + 0.4) * 1.55 + Math.sin(bloomFlight * 4) * 0.24,
         bloomSide * 9.6 + Math.cos(bloomFlight * 2) * 0.4 - (this.bloomDance || 0) * 0.08,
       ];
+      // Slow orbit so the figures are seen from changing angles; the phrase
+      // term makes the move belong to the music's form rather than a timer.
+      this._danceYaw = (this._danceYaw || 0) + dt * (0.05 + this.motion.phrase * 0.03 * this.motion.gridMix);
+      const danceCam = [
+        Math.sin(this._danceYaw) * 1.2,
+        0.35 + Math.sin(this.elapsed * 0.05) * 0.22,
+        4.35 + Math.cos(this._danceYaw) * 0.45,
+      ];
       const bases = {
         pulse: [0, 0.35, 7.2],
+        dance: danceCam,
         ridge: [0, 7.1 + height * 0.75 - u * 0.2, 11.2 - u * 1.4],
         bloom: bloomCam,
         magnetosphere: magnetosphereCam,
@@ -2796,52 +3594,43 @@
       }
     }
 
-    _analyse() {
+    _analyse(dt) {
+      if (this.engineDriven) return;
       const freq = this.freq;
       if (!freq.length) return;
+      const Audio = globalThis.ScvizAudio;
+      if (!Audio) {
+        if (!this._warnedNoEngine) {
+          this._warnedNoEngine = true;
+          console.warn("Soundstage: audio-engine.js not loaded; audio features are inert");
+        }
+        return;
+      }
       const n = freq.length;
-      const bassN = Math.max(2, (n * 0.18) | 0);
-      const midN = Math.max(bassN + 1, (n * 0.55) | 0);
-      let bass = 0;
-      let mid = 0;
-      let high = 0;
-      let peak = 0;
-      let power = 0;
-      for (let i = 0; i < n; i++) {
-        const v = freq[i] / 255;
-        power += v * v;
-        if (v > peak) peak = v;
-        if (i < bassN) bass += v;
-        else if (i < midN) mid += v;
-        else high += v;
+      if (!this._features || this._featureBuckets !== n) {
+        this._featureBuckets = n;
+        this._featureBands = new Float32Array(n);
+        this._features = new Audio.Features({
+          buckets: n,
+          bassEnd: Math.round(n * 0.18),
+          midEnd: Math.round(n * 0.55),
+        });
       }
-      bass /= bassN;
-      mid /= midN - bassN;
-      high /= Math.max(1, n - midN);
-      const rawPower = Math.sqrt(power / n);
-      this.dynPeak = Math.max(peak, (this.dynPeak || 0.28) * 0.995);
-      this.dynGain = Math.min(2.2, 0.86 / Math.max(0.18, this.dynPeak));
-      this.powerFast += (rawPower - this.powerFast) * 0.22;
-      this.powerSlow += (rawPower - this.powerSlow) * 0.025;
-      const sustained = clamp(this.powerFast * this.dynGain * 1.24, 0, 1.2);
-      const transient = clamp((this.powerFast - this.powerSlow) * this.dynGain * 3.4, 0, 0.65);
-      const loudTarget = clamp(sustained * 0.82 + transient, 0, 1.25);
-      const loudEase = loudTarget > this.loudness ? 0.24 : 0.065;
-      this.loudness += (loudTarget - this.loudness) * loudEase;
-      this.integratedPower = this.powerFast;
-      this.rawSmoothBass += (bass - (this.rawSmoothBass || 0)) * 0.18;
-      bass = this._shape(bass);
-      mid = this._shape(mid);
-      high = this._shape(high);
-      if (bass > this.smoothBass + 0.08) {
-        this.kick = Math.min(1, (bass - this.smoothBass) * 3.6 + bass * 0.45);
-      }
-      this.kick *= 0.86;
-      this.bass = bass;
-      this.mid = mid;
-      this.high = high;
-      this.smoothBass += (bass - this.smoothBass) * 0.18;
-      this.energy = Math.min(1.15, bass * 0.48 + mid * 0.34 + high * 0.18);
+      const bands = this._featureBands;
+      for (let i = 0; i < n; i++) bands[i] = freq[i] / 255;
+      const f = this._features.update(bands, dt);
+      this.bass = f.bass;
+      this.mid = f.mid;
+      this.high = f.high;
+      this.smoothBass = f.smoothBass;
+      this.rawSmoothBass = f.rawSmoothBass;
+      this.kick = f.kick;
+      this.loudness = f.loudness;
+      this.energy = f.energy;
+      this.integratedPower = f.integratedPower;
+      this.flux = f.flux;
+      this.dynGain = f.dynGain;
+      this.dynPeak = f.dynPeak;
     }
 
     _drawWaveform() {
@@ -2908,6 +3697,11 @@
       ctx.lineWidth = 2.2;
       ctx.stroke();
     }
+  }
+
+  function M_smoothstep(a, b, x) {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a || 1e-9)));
+    return t * t * (3 - 2 * t);
   }
 
   function clamp(v, lo, hi) {

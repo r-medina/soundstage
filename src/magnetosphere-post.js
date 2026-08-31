@@ -15,6 +15,7 @@
       this.enabled = true;
       this.width = 0;
       this.height = 0;
+      this.samples = -1;
       this.lastReflectionTime = -Infinity;
       this.type = THREE.HalfFloatType || THREE.UnsignedByteType;
       this.passScene = new THREE.Scene();
@@ -51,24 +52,50 @@
         `,
       });
 
-      this.copyMaterial = new THREE.ShaderMaterial({
-        uniforms: { inputTex: { value: null } },
+      // Progressive downsample, 13 taps (Jimenez, "Next Generation Post
+      // Processing in Call of Duty: Advanced Warfare"). A single bilinear tap
+      // per halving is a 2x2 box, which keeps fireflies and turns bright
+      // points into blocks; this partitions the footprint into four
+      // overlapping quads and is stable enough to chain many times.
+      this.downMaterial = new THREE.ShaderMaterial({
+        uniforms: { inputTex: { value: null }, texelSize: { value: new THREE.Vector2(1, 1) } },
         depthTest: false,
         depthWrite: false,
         vertexShader: FULLSCREEN_VERTEX,
         fragmentShader: `
           uniform sampler2D inputTex;
+          uniform vec2 texelSize;
           varying vec2 vUv;
+          vec3 T(vec2 o) { return texture2D(inputTex, vUv + o * texelSize).rgb; }
           void main() {
-            gl_FragColor = texture2D(inputTex, vUv);
+            vec3 a = T(vec2(-2.0,  2.0));
+            vec3 b = T(vec2( 0.0,  2.0));
+            vec3 c = T(vec2( 2.0,  2.0));
+            vec3 d = T(vec2(-2.0,  0.0));
+            vec3 e = T(vec2( 0.0,  0.0));
+            vec3 f = T(vec2( 2.0,  0.0));
+            vec3 g = T(vec2(-2.0, -2.0));
+            vec3 h = T(vec2( 0.0, -2.0));
+            vec3 i = T(vec2( 2.0, -2.0));
+            vec3 j = T(vec2(-1.0,  1.0));
+            vec3 k = T(vec2( 1.0,  1.0));
+            vec3 l = T(vec2(-1.0, -1.0));
+            vec3 m = T(vec2( 1.0, -1.0));
+            vec3 o = e * 0.125;
+            o += (a + c + g + i) * 0.03125;
+            o += (b + d + f + h) * 0.0625;
+            o += (j + k + l + m) * 0.125;
+            gl_FragColor = vec4(o, 1.0);
           }
         `,
       });
 
-      this.blurMaterial = new THREE.ShaderMaterial({
+      // 3x3 tent upsample. Reading a w/32 texture with plain bilinear at full
+      // resolution shows the interpolation diamonds; filtering back up the
+      // chain a level at a time keeps it smooth.
+      this.upMaterial = new THREE.ShaderMaterial({
         uniforms: {
           inputTex: { value: null },
-          direction: { value: new THREE.Vector2(1, 0) },
           texelSize: { value: new THREE.Vector2(1, 1) },
           radius: { value: 1 },
         },
@@ -77,18 +104,15 @@
         vertexShader: FULLSCREEN_VERTEX,
         fragmentShader: `
           uniform sampler2D inputTex;
-          uniform vec2 direction;
           uniform vec2 texelSize;
           uniform float radius;
           varying vec2 vUv;
+          vec3 T(vec2 o) { return texture2D(inputTex, vUv + o * texelSize * radius).rgb; }
           void main() {
-            vec2 stepUv = direction * texelSize * radius;
-            vec3 color = texture2D(inputTex, vUv).rgb * 0.2270270270;
-            color += texture2D(inputTex, vUv + stepUv * 1.3846153846).rgb * 0.3162162162;
-            color += texture2D(inputTex, vUv - stepUv * 1.3846153846).rgb * 0.3162162162;
-            color += texture2D(inputTex, vUv + stepUv * 3.2307692308).rgb * 0.0702702703;
-            color += texture2D(inputTex, vUv - stepUv * 3.2307692308).rgb * 0.0702702703;
-            gl_FragColor = vec4(color, 1.0);
+            vec3 o = T(vec2(-1.0,  1.0)) + T(vec2(0.0,  1.0)) * 2.0 + T(vec2(1.0,  1.0));
+            o += T(vec2(-1.0,  0.0)) * 2.0 + T(vec2(0.0, 0.0)) * 4.0 + T(vec2(1.0, 0.0)) * 2.0;
+            o += T(vec2(-1.0, -1.0)) + T(vec2(0.0, -1.0)) * 2.0 + T(vec2(1.0, -1.0));
+            gl_FragColor = vec4(o * 0.0625, 1.0);
           }
         `,
       });
@@ -189,7 +213,7 @@
       this.savedClearColor = new THREE.Color();
     }
 
-    _target(width, height, depthBuffer = false, type = this.type) {
+    _target(width, height, depthBuffer = false, type = this.type, samples = 0) {
       const target = new THREE.WebGLRenderTarget(Math.max(1, width), Math.max(1, height), {
         type,
         format: THREE.RGBAFormat,
@@ -197,29 +221,44 @@
         magFilter: THREE.LinearFilter,
         depthBuffer,
         stencilBuffer: false,
+        samples,
       });
       target.texture.generateMipmaps = false;
       if (THREE.LinearSRGBColorSpace) target.texture.colorSpace = THREE.LinearSRGBColorSpace;
       return target;
     }
 
-    resize(width, height) {
+    /**
+     * @param {number} samples MSAA samples for the scene target. The renderer's
+     *   own `antialias: true` applies only to the default framebuffer, and this
+     *   mode renders into a target instead -- so without this it is the one
+     *   mode with no antialiasing at all, which is very visible on the thin
+     *   additive lines it is mostly made of.
+     */
+    resize(width, height, samples = 0) {
       width = Math.max(2, Math.floor(width));
       height = Math.max(2, Math.floor(height));
-      if (width === this.width && height === this.height) return;
+      if (width === this.width && height === this.height && samples === this.samples) return;
       this.width = width;
       this.height = height;
+      this.samples = samples;
       this.lastReflectionTime = -Infinity;
       this._disposeTargets();
-      this.sceneTarget = this._target(width, height, true);
-      this.voidMaskTarget = this._target(width, height, false, THREE.UnsignedByteType);
+      this.sceneTarget = this._target(width, height, true, this.type, samples);
+      // The mask is thresholded with a smoothstep in the composite, so a hard
+      // aliased edge here becomes a visibly jagged cutout around every dark
+      // core. It is an RGBA8 target, so multisampling it is cheap.
+      this.voidMaskTarget = this._target(width, height, false, THREE.UnsignedByteType, samples);
       this.reflectionTarget = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
-      this.halfA = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
-      this.halfB = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
-      this.quarterA = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
-      this.quarterB = this._target(Math.ceil(width / 4), Math.ceil(height / 4));
-      this.auraTarget = this._target(Math.ceil(width / 6), Math.ceil(height / 6));
-      this.auraScratch = this._target(Math.ceil(width / 6), Math.ceil(height / 6));
+      // Strict halvings. The old chain went w/4 -> w/6, a 1.5x downscale taken
+      // with one bilinear tap, which drops and duplicates texels and aliases by
+      // construction.
+      this.mips = [];
+      for (let i = 0; i < 5; i++) {
+        const d = 2 << i; // 2, 4, 8, 16, 32
+        this.mips.push(this._target(Math.ceil(width / d), Math.ceil(height / d)));
+      }
+      this.fineScratch = this._target(Math.ceil(width / 2), Math.ceil(height / 2));
     }
 
     _draw(material, target) {
@@ -229,25 +268,19 @@
       this.renderer.render(this.passScene, this.passCamera);
     }
 
-    _blur(input, scratch, output, radius) {
-      const uniforms = this.blurMaterial.uniforms;
-      uniforms.inputTex.value = input.texture;
-      uniforms.texelSize.value.set(1 / input.width, 1 / input.height);
-      uniforms.direction.value.set(1, 0);
-      uniforms.radius.value = radius;
-      this._draw(this.blurMaterial, scratch);
-      uniforms.inputTex.value = scratch.texture;
-      uniforms.texelSize.value.set(1 / scratch.width, 1 / scratch.height);
-      uniforms.direction.value.set(0, 1);
-      this._draw(this.blurMaterial, output);
+    _down(input, output) {
+      const u = this.downMaterial.uniforms;
+      u.inputTex.value = input.texture;
+      u.texelSize.value.set(1 / input.width, 1 / input.height);
+      this._draw(this.downMaterial, output);
     }
 
-    _aura(input, output, radius) {
-      this.copyMaterial.uniforms.inputTex.value = input.texture;
-      this._draw(this.copyMaterial, output);
-      const passRadius = radius * 0.72;
-      this._blur(output, this.auraScratch, output, passRadius);
-      this._blur(output, this.auraScratch, output, passRadius);
+    _up(input, output, radius) {
+      const u = this.upMaterial.uniforms;
+      u.inputTex.value = input.texture;
+      u.texelSize.value.set(1 / input.width, 1 / input.height);
+      u.radius.value = radius;
+      this._draw(this.upMaterial, output);
     }
 
     render(scene, camera, options = {}) {
@@ -295,23 +328,40 @@
           renderer.setClearColor(this.savedClearColor, previousClearAlpha);
         }
 
+        const mips = this.mips;
         this.brightMaterial.uniforms.inputTex.value = this.sceneTarget.texture;
         this.brightMaterial.uniforms.threshold.value = options.threshold ?? 0.78;
         this.brightMaterial.uniforms.knee.value = options.knee ?? 0.42;
-        this._draw(this.brightMaterial, this.halfA);
-        this._blur(this.halfA, this.halfB, this.halfA, options.fineRadius ?? 1.15);
+        this._draw(this.brightMaterial, mips[0]);
 
-        this.copyMaterial.uniforms.inputTex.value = this.halfA.texture;
-        this._draw(this.copyMaterial, this.quarterA);
-        this._blur(this.quarterA, this.quarterB, this.quarterA, options.mediumRadius ?? 2.65);
+        for (let i = 1; i < mips.length; i++) this._down(mips[i - 1], mips[i]);
 
-        this._aura(this.quarterA, this.auraTarget, options.veilRadius ?? 4.4);
+        // Every band is now produced by filtering back UP the pyramid, and
+        // every kernel is compact: a 13-tap downsample or a 3x3 tent, always
+        // at the resolution it was designed for.
+        //
+        // Nothing here uses a separable Gaussian any more. The old chain
+        // stretched a 5-tap kernel to radius 2.65 and 4.2, putting its taps
+        // +-13 texels apart -- horizontal pass draws five copies, vertical
+        // pass draws five more, and the resulting 5x5 lattice is exactly the
+        // hard square around every bright point. Even at radius 1 it ghosts on
+        // an isolated star, because a single bright texel is not band-limited.
+        //
+        // Order matters: each level is read as a band's source before it is
+        // reused as a coarser band's output.
+        const fineRadius = Math.min(1.75, Math.max(0.75, options.fineRadius ?? 1.1));
+        const mediumRadius = Math.min(1.75, Math.max(0.75, options.mediumRadius ?? 1.15));
+        const veilRadius = Math.min(1.75, Math.max(0.75, options.veilRadius ?? 1.35));
+        this._up(mips[1], this.fineScratch, fineRadius);
+        this._up(mips[2], mips[1], mediumRadius);
+        this._up(mips[4], mips[3], veilRadius);
+        this._up(mips[3], mips[2], veilRadius);
 
         const composite = this.compositeMaterial.uniforms;
         composite.sceneTex.value = this.sceneTarget.texture;
-        composite.bloomHalf.value = this.halfA.texture;
-        composite.bloomQuarter.value = this.quarterA.texture;
-        composite.bloomAura.value = this.auraTarget.texture;
+        composite.bloomHalf.value = this.fineScratch.texture;
+        composite.bloomQuarter.value = mips[1].texture;
+        composite.bloomAura.value = mips[2].texture;
         composite.voidMaskTex.value = this.voidMaskTarget.texture;
         composite.bloomStrength.value = options.bloomStrength ?? 1.18;
         composite.exposure.value = options.exposure ?? 1.08;
@@ -333,28 +383,20 @@
     }
 
     _disposeTargets() {
-      for (const name of [
-        "sceneTarget",
-        "voidMaskTarget",
-        "reflectionTarget",
-        "halfA",
-        "halfB",
-        "quarterA",
-        "quarterB",
-        "auraTarget",
-        "auraScratch",
-      ]) {
+      for (const name of ["sceneTarget", "voidMaskTarget", "reflectionTarget", "fineScratch"]) {
         this[name]?.dispose();
         this[name] = null;
       }
+      if (this.mips) for (const m of this.mips) m.dispose();
+      this.mips = null;
     }
 
     dispose() {
       this._disposeTargets();
       this.quad.geometry.dispose();
       this.brightMaterial.dispose();
-      this.copyMaterial.dispose();
-      this.blurMaterial.dispose();
+      this.downMaterial.dispose();
+      this.upMaterial.dispose();
       this.compositeMaterial.dispose();
       this.voidMaskMaterial.dispose();
     }
@@ -363,6 +405,7 @@
       this._disposeTargets();
       this.width = 0;
       this.height = 0;
+      this.samples = -1;
       this.lastReflectionTime = -Infinity;
     }
   }

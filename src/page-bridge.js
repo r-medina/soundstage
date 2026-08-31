@@ -5,7 +5,9 @@
   window.addEventListener("message", (event) => {
     const data = event.data;
     if (data?.source === "scviz-control" && data.type === "audio-active") {
+      if (data.workletUrl) workletUrl = data.workletUrl;
       audioActive = Boolean(data.active);
+      syncEngine();
     }
   });
   const NativeAC = window.AudioContext || window.webkitAudioContext;
@@ -48,79 +50,63 @@
     };
   }
 
+  let engine = null;
+  let audioCtx = null;
+  let audioSource = null;
+  let workletUrl = "";
+  const frameMsg = { type: "audio-frame" };
+  let statusAt = 0;
+
   function attachAnalyser(ctx, sourceNode) {
-    if (window.__scvizAnalyser) return;
-    try {
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 4096;
-      analyser.smoothingTimeConstant = 0.38;
-      analyser.minDecibels = -90;
-      analyser.maxDecibels = -22;
-      sourceNode.connect(analyser);
-      window.__scvizAnalyser = analyser;
-      startPump(analyser);
-    } catch {
-      // SoundCloud may already have exclusive use of the node.
+    if (audioSource) return;
+    audioCtx = ctx;
+    audioSource = sourceNode;
+    syncEngine();
+  }
+
+  /**
+   * The engine owns an audio-thread tap, so it is torn down when playing mode
+   * is off rather than left running. Restarting is cheap: the worklet module
+   * is only fetched once per AudioContext.
+   */
+  function syncEngine() {
+    if (!audioSource) return;
+    if (audioActive && !engine) {
+      const Audio = window.ScvizAudio;
+      if (!Audio) return;
+      try {
+        engine = new Audio.AudioEngine(audioCtx, audioSource, {
+          workletUrl,
+          onFrame: emitFrame,
+          onStatus: (status) => post({ type: "audio-status", status }),
+        });
+        engine.start().catch(() => {});
+      } catch {
+        engine = null;
+      }
+    } else if (!audioActive && engine) {
+      engine.stop();
+      engine = null;
+      statusAt = 0;
     }
   }
 
-  function startPump(analyser) {
-    if (window.__scvizPumping) return;
-    window.__scvizPumping = true;
-
-    const freqFull = new Uint8Array(analyser.frequencyBinCount);
-    const timeFull = new Uint8Array(analyser.fftSize);
-    const freq = new Uint8Array(256);
-    const time = new Uint8Array(512);
-
-    const tick = () => {
-      const a = window.__scvizAnalyser;
-      if (a && audioActive) {
-        a.getByteFrequencyData(freqFull);
-        a.getByteTimeDomainData(timeFull);
-        logBucket(freqFull, freq, a);
-        pick(timeFull, time);
-        post({ type: "audio", freq, time });
-      }
-      if (audioActive) requestAnimationFrame(tick);
-      else setTimeout(tick, 200);
-    };
-    tick();
-  }
-
-  function pick(src, dest) {
-    const step = src.length / dest.length;
-    for (let i = 0; i < dest.length; i++) dest[i] = src[(i * step) | 0];
-  }
-
-  function logBucket(src, dest, analyser) {
-    const n = dest.length;
-    const N = src.length;
-    const sr = analyser?.context?.sampleRate || 44100;
-    const fftSize = analyser?.fftSize || N * 2;
-    const binHz = sr / fftSize;
-    const minIdx = Math.max(1, Math.round(38 / binHz));
-    const maxIdx = Math.min(N - 1, Math.round(15500 / binHz));
-    const span = Math.max(2, maxIdx / minIdx);
-    for (let i = 0; i < n; i++) {
-      const lo = Math.max(
-        minIdx,
-        Math.floor(minIdx * Math.pow(span, i / n))
-      );
-      const hi = Math.max(
-        lo + 1,
-        Math.floor(minIdx * Math.pow(span, (i + 1) / n))
-      );
-      let peak = 0;
-      let sum = 0;
-      let count = 0;
-      for (let j = lo; j < hi && j < N; j++) {
-        const v = src[j];
-        sum += v;
-        count++;
-        if (v > peak) peak = v;
-      }
-      dest[i] = count ? 0.4 * (sum / count) + 0.6 * peak : 0;
+  function emitFrame(f) {
+    // Copy every field the engine produces rather than a hand-written list.
+    // The list version was written before the onset layer and beat clock
+    // existed and was never updated, so none of that reached the page: the
+    // visualiser saw levels and a spectrum but no onsets, no tempo and no
+    // beat phase, and silently fell back to purely reactive behaviour.
+    // `bands` is the analysis-side float spectrum; the page renders from
+    // `freq`, so there is no reason to pay to clone it every hop.
+    for (const key in f) {
+      if (key === "bands") continue;
+      frameMsg[key] = f[key];
+    }
+    post(frameMsg);
+    if (f.hop - statusAt >= 60) {
+      statusAt = f.hop;
+      post({ type: "audio-status", status: engine.status() });
     }
   }
 

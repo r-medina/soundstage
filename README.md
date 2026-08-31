@@ -71,6 +71,9 @@ python3 -m http.server 8765
 
 Load or drop an MP3. `H` hides chrome. `?mode=ridge&hide=1` is useful for stills.
 
+It has to be *served*, not opened as a `file://` path — Dance mode fetches a
+`.glb`, and browsers block that from `file://` origins.
+
 ## Layout
 
 ```

@@ -20,7 +20,10 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["tabCapture", "storage"],
+  "permissions": [
+    "tabCapture",
+    "storage"
+  ],
   "host_permissions": [
     "https://soundcloud.com/*",
     "https://*.soundcloud.com/*",
@@ -38,29 +41,61 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://soundcloud.com/*", "https://*.soundcloud.com/*"],
-      "js": ["src/page-bridge.js"],
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://*.soundcloud.com/*"
+      ],
+      "js": [
+        "src/audio-engine.js",
+        "src/page-bridge.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["https://soundcloud.com/*", "https://*.soundcloud.com/*"],
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://*.soundcloud.com/*"
+      ],
       "js": [
         "src/vendor/three.min.js",
+        "src/vendor/three-addons.js",
         "src/magnetosphere-post.js",
+        "src/audio-engine.js",
+        "src/audio-hud.js",
+        "src/motion.js",
         "src/visualizer.js",
         "src/content.js"
       ],
-      "css": ["src/overlay.css"],
+      "css": [
+        "src/overlay.css"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     },
     {
-      "matches": ["https://soundcloud.com/*", "https://*.soundcloud.com/*"],
-      "js": ["src/frame.js"],
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://*.soundcloud.com/*"
+      ],
+      "js": [
+        "src/frame.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/audio-worklet.js",
+        "src/assets/RobotExpressive.glb"
+      ],
+      "matches": [
+        "https://soundcloud.com/*",
+        "https://*.soundcloud.com/*"
+      ]
     }
   ]
 }

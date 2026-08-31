@@ -1,0 +1,205 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Soundstage track check</title>
+<style>
+  body { background:#0b0c10; color:#dfe3ea; font:12px ui-monospace,Menlo,monospace; padding:18px; }
+  .ok { color:#7bdc7b } .bad { color:#ff6b7a } .dim { color:#8b93a3 }
+</style>
+<h3>track check</h3>
+<pre id="out">running…</pre>
+<script src="../src/audio-engine.js"></script>
+<script>
+/**
+ * Runs the real analysis chain over decoded audio, far faster than realtime.
+ * The pump is bypassed -- everything downstream of it (mel bank, whitening,
+ * onset streams, beat clock) is exactly what ships.
+ *
+ * Serve the repo (python3 -m http.server 8791) and point it at audio. To use
+ * a folder outside the repo, symlink it in first:
+ *
+ *   ln -s ~/Music/some-folder ./tracks-tmp
+ *   scripts/track-check.html?file=../tracks-tmp/a.mp3&file=../tracks-tmp/b.mp3&bpm=126
+ *
+ * Repeat ?file= per track (track names contain commas). ?bpm= is the expected
+ * tempo, used for the octave check and to score downbeat placement against a
+ * bar grid anchored on the first transient. ?skip= and ?span= are seconds.
+ */
+window.__trackCheck = (async () => {
+  const q = new URLSearchParams(location.search);
+  // Repeated ?file= params, not a comma-separated list: track names contain
+  // commas ("Dan Barrow, Gutenn - ...") and split them into broken paths.
+  const files = q.getAll("file").filter(Boolean);
+  const expected = q.get("bpm") ? Number(q.get("bpm")) : null;
+  const skip = Number(q.get("skip") || 0); // seconds of intro to ignore
+  const span = Number(q.get("span") || 90); // seconds to analyse
+  const ctx = new AudioContext();
+  const results = [];
+
+  // Percentiles, not min/max: the complaint is that the glow SITS bright, so
+  // what matters is where the value spends its time, not the extremes it
+  // touches once during an intro.
+  const pct = (arr) => {
+    if (!arr.length) return null;
+    const a = arr.slice().sort((x, y) => x - y);
+    const at = (q) => +a[Math.min(a.length - 1, Math.floor(a.length * q))].toFixed(3);
+    return { p10: at(0.1), p50: at(0.5), p90: at(0.9), spread: +(at(0.9) - at(0.1)).toFixed(3) };
+  };
+
+  for (const file of files) {
+    const t0 = performance.now();
+    let buf;
+    try {
+      // One retry: batching many large decodes in a single page occasionally
+      // drops a fetch under memory pressure.
+      let bytes;
+      for (let attempt = 0; attempt < 2 && !bytes; attempt++) {
+        try {
+          const res = await fetch(file);
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          bytes = await res.arrayBuffer();
+        } catch (e) {
+          if (attempt) throw e;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      buf = await ctx.decodeAudioData(bytes);
+    } catch (err) {
+      // One unreadable file must not abort the whole corpus run.
+      results.push({ file: file.split("/").pop(), error: String(err && err.message || err) });
+      continue;
+    }
+    const sr = buf.sampleRate;
+    const a = buf.getChannelData(0);
+    const b = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+
+    const engine = new ScvizAudio.AudioEngine(ctx, { connect() {}, disconnect() {} }, {});
+    const hop = engine.hop;
+    const dt = hop / sr;
+    const chunk = new Float32Array(hop);
+
+    const from = Math.min(a.length, Math.floor(skip * sr));
+    const to = Math.min(a.length, from + Math.floor(span * sr));
+    // Ground truth anchor: the first real transient in the file.
+    let firstTransient = 0;
+    {
+      let peak = 0;
+      for (let i = 0; i < a.length; i += 7) if (Math.abs(a[i]) > peak) peak = Math.abs(a[i]);
+      const thresh = peak * 0.2;
+      for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i]) > thresh) { firstTransient = i / sr; break; }
+      }
+    }
+
+    const track = [];
+    const downbeats = [];
+    let lockAt = -1;
+    let offsetChanges = 0;
+    let lastOffset = -1;
+    let confSum = 0;
+    let confN = 0;
+
+    // Raw loudness against the same re-normalisation the visuals apply, so the
+    // dynamic range a real track actually offers the glow is measurable.
+    let lmin = null, lmax = null, dynLo = 1e9, dynHi = -1e9, rawLo = 1e9, rawHi = -1e9;
+    const MEM = 7;
+    const rawSamples = [];
+    const dynSamples = [];
+    const odfS = { low: [], mid: [], high: [] };
+    const thrS = { low: [], mid: [], high: [] };
+    const onsetN = { low: 0, mid: 0, high: 0 };
+    const magS = [];
+    engine.onFrame = (f) => {
+      confSum += f.confidence;
+      confN++;
+      if (f.t > from / sr + 5) {
+        const L = f.loudness;
+        const settle = Math.exp(-dt / MEM);
+        lmax = lmax === null ? L : Math.max(L, lmax * settle + L * (1 - settle));
+        lmin = lmin === null ? L : Math.min(L, lmin * settle + L * (1 - settle));
+        const range = lmax - lmin;
+        const norm = Math.min(1, Math.max(0, (L - lmin) / Math.max(range, 1e-4)));
+        const t2 = Math.min(1, Math.max(0, (range - 0.03) / 0.09));
+        const dyn = 0.15 + (0.45 + (norm - 0.45) * t2 * t2 * (3 - 2 * t2)) * 0.75;
+        rawLo = Math.min(rawLo, L); rawHi = Math.max(rawHi, L);
+        dynLo = Math.min(dynLo, dyn); dynHi = Math.max(dynHi, dyn);
+        if (f.hop % 6 === 0) { rawSamples.push(L); dynSamples.push(dyn); }
+      }
+      if (f.confidence > 0.5 && lockAt < 0) lockAt = f.t;
+      if (f.confidence > 0.5) {
+        if (lastOffset >= 0 && engine.clock.downbeatOffset !== lastOffset) offsetChanges++;
+        lastOffset = engine.clock.downbeatOffset;
+      }
+      // Per-stream onset diagnostics: is the detection function large enough
+      // to ever cross its own threshold on real, densely-mixed material?
+      if (f.t > from / sr + 5) {
+        for (const k of ["low", "mid", "high"]) {
+          odfS[k].push(f.odf[k]);
+          thrS[k].push(f.thresh[k]);
+          if (f.hit[k] > 0) onsetN[k]++;
+        }
+        magS.push(f.peak);
+      }
+      if (f.downbeat && f.confidence > 0.5) downbeats.push(+f.t.toFixed(3));
+      if (f.hop % 200 === 0) track.push({ t: +f.t.toFixed(1), bpm: +f.bpm.toFixed(2), conf: +f.confidence.toFixed(2) });
+    };
+
+    let hopIndex = 0;
+    for (let p = from; p + hop <= to; p += hop) {
+      for (let i = 0; i < hop; i++) chunk[i] = b ? (a[p + i] + b[p + i]) * 0.5 : a[p + i];
+      engine._push(chunk, hop);
+      engine._analyse((p + hop) / sr, hopIndex++, dt);
+    }
+
+    // Where each detected downbeat sits within the true bar, measured from the
+    // first transient. A correct, stable downbeat clusters tightly near 0.
+    const barSecs = expected ? (4 * 60) / expected : 0;
+    const phases = barSecs
+      ? downbeats.map((t) => {
+          const r = (((t - firstTransient) % barSecs) + barSecs) % barSecs;
+          return Math.min(r, barSecs - r);
+        }).sort((x, y) => x - y)
+      : [];
+    const medPhase = phases.length ? phases[phases.length >> 1] : null;
+
+    const bpms = track.filter((x) => x.conf > 0.5).map((x) => x.bpm).sort((x, y) => x - y);
+    const median = bpms.length ? bpms[bpms.length >> 1] : 0;
+    const spread = bpms.length ? bpms[bpms.length - 1] - bpms[0] : 0;
+    results.push({
+      file: file.split("/").pop(),
+      sampleRate: sr,
+      median, spread,
+      lockSeconds: lockAt > 0 ? +(lockAt - from / sr).toFixed(1) : null,
+      meanConfidence: confN ? +(confSum / confN).toFixed(2) : 0,
+      downbeatChanges: offsetChanges,
+      firstTransient: +firstTransient.toFixed(3),
+      downbeatCount: downbeats.length,
+      downbeatOffBarMs: medPhase === null ? null : +(medPhase * 1000).toFixed(0),
+      downbeatSpreadMs: phases.length > 2
+        ? +((phases[phases.length - 1] - phases[0]) * 1000).toFixed(0) : null,
+      octaveOf: expected ? +(median / expected).toFixed(3) : null,
+      dbScore: Array.from(engine.clock.dbScore).map((v) => +v.toFixed(3)),
+      dbOffset: engine.clock.downbeatOffset,
+      dbBands: Array.from(engine.clock.dbBands).map((v) => +v.toFixed(3)),
+      concentration: +engine.clock.concentration.toFixed(3),
+      downbeatConfidence: +engine.clock.downbeatConfidence.toFixed(3),
+      acfPeak: +engine.clock.acfPeak.toFixed(3),
+      onsetsPerSec: Object.fromEntries(
+        ["low", "mid", "high"].map((k) => [k, +(onsetN[k] / ((to - from) / sr - 5)).toFixed(2)])
+      ),
+      odf: Object.fromEntries(["low", "mid", "high"].map((k) => [k, pct(odfS[k])])),
+      thresh: Object.fromEntries(["low", "mid", "high"].map((k) => [k, pct(thrS[k])])),
+      dynPeak: pct(magS),
+      loudnessRaw: pct(rawSamples),
+      loudnessGlow: pct(dynSamples),
+      analysedSeconds: +((to - from) / sr).toFixed(0),
+      wallSeconds: +((performance.now() - t0) / 1000).toFixed(1),
+      track: track.filter((x, i) => i % 4 === 0),
+    });
+  }
+
+  document.querySelector("#out").textContent = results
+    .map((r) => `${r.file}\n  median ${r.median} bpm  spread ${r.spread}  lock ${r.lockSeconds}s  conf ${r.meanConfidence}\n  downbeat ${r.downbeatOffBarMs} ms off bar (spread ${r.downbeatSpreadMs}), ${r.downbeatChanges} offset changes`)
+    .join("\n\n");
+  return { results };
+})();
+</script>

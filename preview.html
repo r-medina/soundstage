@@ -58,6 +58,7 @@
           <option value="pulse">Pulse</option>
           <option value="ridge">Ridge</option>
           <option value="bloom">Bloom</option>
+          <option value="dance">Dance</option>
         </select>
       </label>
       <label data-mode-only="magnetosphere">Scene
@@ -96,6 +97,7 @@
         <label class="knob" data-for="bloom"><span>Size</span><output></output><input data-param="bloomSize" type="range" min="0.4" max="2.2" step="0.05" value="1"></label>
         <label class="knob" data-for="bloom"><span>Spread</span><output></output><input data-param="bloomSpread" type="range" min="0" max="1.6" step="0.05" value="0.55"></label>
         <label class="knob" data-for="bloom"><span>Spin</span><output></output><input data-param="bloomSpin" type="range" min="0" max="2.5" step="0.05" value="1"></label>
+        <label class="knob" data-for="bloom"><span>Outer spin</span><output></output><input data-param="bloomSwirl" type="range" min="0" max="5" step="0.05" value="1.5"></label>
         <label class="knob" data-for="bloom"><span>Shape</span><output></output><input data-param="bloomShape" type="range" min="0" max="1" step="0.01" value="0.28"></label>
         <label class="knob" data-for="bloom"><span>Hue</span><output></output><input data-param="bloomHue" type="range" min="0" max="1" step="0.01" value="0.72"></label>
         <label class="knob" data-for="bloom"><span>Warm</span><output></output><input data-param="bloomWarm" type="range" min="0" max="1" step="0.01" value="0.42"></label>
@@ -120,7 +122,11 @@
     </div>
     <div class="hint">Drop an MP3 · H hides controls · deterministic seed + real Web Audio analysis</div>
     <script src="src/vendor/three.min.js"></script>
+    <script src="src/vendor/three-addons.js"></script>
     <script src="src/magnetosphere-post.js"></script>
+    <script src="src/audio-engine.js"></script>
+    <script src="src/audio-hud.js"></script>
+    <script src="src/motion.js"></script>
     <script src="src/visualizer.js"></script>
     <script>
       const query = new URLSearchParams(location.search);
@@ -170,8 +176,10 @@
       let frames = 0;
       let fpsAt = performance.now();
       let audioContext = null;
-      let analyser = null;
+      let engine = null;
       let mediaSource = null;
+      const hud = new ScvizAudioHud().mount();
+      viz.onRender = () => hud.tickRender();
       let songUrl = "";
 
       const readLabParams = () => {
@@ -218,14 +226,24 @@
       });
 
       const ensureAudioGraph = async () => {
-        if (!audioContext) audioContext = new AudioContext();
-        if (!analyser) {
-          analyser = audioContext.createAnalyser();
-          analyser.fftSize = 512;
-          analyser.smoothingTimeConstant = 0.68;
+        if (!audioContext) {
+          audioContext = new AudioContext();
+          hud.ctxAudio = audioContext;
+        }
+        if (!engine) {
           mediaSource = audioContext.createMediaElementSource(player);
-          mediaSource.connect(analyser);
-          analyser.connect(audioContext.destination);
+          mediaSource.connect(audioContext.destination);
+          engine = new ScvizAudio.AudioEngine(audioContext, mediaSource, {
+            workletUrl: new URL("src/audio-worklet.js", location.href).href,
+            onFrame: (frame) => {
+              viz.setFrame(frame);
+              hud.push(frame);
+            },
+            onStatus: (status) => hud.setStatus(status),
+          });
+          window.__scvizEngine = engine; // poke from devtools
+          await engine.start();
+          setInterval(() => hud.setStatus(engine.status()), 700);
         }
         await audioContext.resume();
       };
@@ -295,13 +313,12 @@
 
       const feed = () => {
         const kind = audioSelect.value;
-        if (kind === "local" && analyser) {
-          analyser.getByteFrequencyData(freq);
-          analyser.getByteTimeDomainData(wave);
-        } else {
+        // Local playback is driven by the engine on its own fixed clock; only
+        // the synthetic generators still push raw bytes at render rate.
+        if (kind !== "local") {
           feedSynthetic(performance.now() * 0.001, kind);
+          viz.setAudio(freq, wave);
         }
-        viz.setAudio(freq, wave);
         frames++;
         if (performance.now() - fpsAt > 500) {
           const fps = Math.round(frames * 1000 / (performance.now() - fpsAt));
@@ -351,7 +368,9 @@
         link.click();
       });
       addEventListener("keydown", (event) => {
-        if (event.key.toLowerCase() === "h") document.querySelector("#panel").classList.toggle("is-dim");
+        const key = event.key.toLowerCase();
+        if (key === "h") document.querySelector("#panel").classList.toggle("is-dim");
+        if (key === "d") hud.toggle();
       });
       addEventListener("resize", () => viz.resize());
     </script>

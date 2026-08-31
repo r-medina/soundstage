@@ -18,3 +18,23 @@ SoundCloud
   SoundCloud is a trademark of SoundCloud Ltd. This project is an unofficial
   Chrome extension and is not affiliated with, endorsed, or sponsored by
   SoundCloud.
+
+## Dance mode assets
+
+`src/assets/RobotExpressive.glb` — model by Tomás Laulhé
+(https://www.patreon.com/quaternius), released under CC0 1.0. Modifications by
+Don McCurdy (https://donmccurdy.com/): three facial expression morph targets,
+converted with FBX2GLTF, duplicate materials removed and material metalness
+reduced. Obtained from the three.js repository
+(examples/models/gltf/RobotExpressive/, r160).
+
+Deliberately NOT the Soldier/Michelle/Xbot models used by other three.js
+examples: those are Mixamo assets, credited individually rather than covered by
+three.js's MIT licence, and Adobe's General Terms sec. 3.6 forbids distributing
+Content Files "on a stand-alone basis, outside of the End Use" — which a .glb
+committed to a public repository would be.
+
+`src/vendor/three-addons.js` — GLTFLoader, BufferGeometryUtils and
+SkeletonUtils from three.js r160 (MIT), converted from ES modules to a classic
+script by `scripts/build-three-addons.mjs`. Regenerate with that script rather
+than editing it.

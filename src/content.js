@@ -30,6 +30,7 @@
     lastToastId: "",
     capture: null,
     tapAliveAt: 0,
+    hud: null,
     captureTried: false,
     viz: null,
     raf: 0,
@@ -41,6 +42,7 @@
       bloomSize: 1,
       bloomSpread: 0.55,
       bloomSpin: 1,
+      bloomSwirl: 1.5,
       bloomShape: 0.28,
       bloomHue: 0.72,
       bloomWarm: 0.42,
@@ -122,6 +124,8 @@
       playbarObserver?.disconnect();
       trackObserver?.disconnect();
       state.viz?.stop();
+      state.hud?.destroy();
+      state.hud = null;
       teardownCapture();
     } catch {
       // stale extension world
@@ -210,10 +214,14 @@
           state.trackId = data.id;
         }
       }
-      if (data.type === "audio") {
+      if (data.type === "audio-frame") {
         state.tapAliveAt = performance.now();
-        if (state.on && !state.capture) state.viz?.setAudio(data.freq, data.time);
+        if (state.on && !state.capture) {
+          state.viz?.setFrame(data);
+          state.hud?.push(data);
+        }
       }
+      if (data.type === "audio-status" && !state.capture) state.hud?.setStatus(data.status);
       return;
     }
     if (data.source === "scviz-frame") {
@@ -252,7 +260,19 @@
     } else if (event.key === "t" || event.key === "T") {
       event.preventDefault();
       toggleTray();
+    } else if (event.key === "d" || event.key === "D") {
+      event.preventDefault();
+      toggleAudioHud();
     }
+  }
+
+  function toggleAudioHud() {
+    if (!state.hud) {
+      const Hud = window.ScvizAudioHud;
+      if (!Hud) return;
+      state.hud = new Hud({ audioContext: state.capture?.ctx || null }).mount(root || document.body);
+    }
+    state.hud.toggle();
   }
 
   function watchPlaybar() {
@@ -463,7 +483,18 @@
   }
 
   function setPageAudioActive(active) {
-    window.postMessage({ source: "scviz-control", type: "audio-active", active }, "*");
+    // The MAIN-world bridge has no chrome.runtime, so it cannot resolve the
+    // worklet itself. web_accessible_resources makes this URL fetchable there.
+    let workletUrl = "";
+    try {
+      workletUrl = chrome.runtime.getURL("src/audio-worklet.js");
+    } catch {
+      // extension context may be invalidated; the bridge falls back on its own
+    }
+    window.postMessage(
+      { source: "scviz-control", type: "audio-active", active, workletUrl },
+      "*"
+    );
   }
 
   function flashHint() {
@@ -543,6 +574,7 @@
             paramSlider("bloomSize", "Size", 0.4, 2.2, 0.05, "bloom"),
             paramSlider("bloomSpread", "Spread", 0, 1.6, 0.05, "bloom"),
             paramSlider("bloomSpin", "Spin", 0, 2.5, 0.05, "bloom"),
+            paramSlider("bloomSwirl", "Outer spin", 0, 5, 0.05, "bloom"),
             paramSlider("bloomShape", "Shape", 0, 1, 0.01, "bloom"),
             paramSlider("bloomHue", "Hue", 0, 1, 0.01, "bloom"),
             paramSlider("bloomWarm", "Warm", 0, 1, 0.01, "bloom"),
@@ -596,7 +628,12 @@
     toastsEl = root.querySelector(".scviz-toasts");
     railEl = root.querySelector(".scviz-rail");
 
-    state.viz = new SCVizVisualizer(canvas, waveCanvas);
+    state.viz = new SCVizVisualizer(canvas, waveCanvas, {
+      // Extension resources are not reachable by relative path from the page.
+      assetUrl: (path) => chrome.runtime.getURL(path),
+    });
+    // Lets the HUD compare the render clock against the analysis clock.
+    state.viz.onRender = () => state.hud?.tickRender();
     state.viz.setDisc(artDisc);
     state.viz.setParams(state.params);
     state.mode = state.viz.setMode(state.mode);
@@ -754,6 +791,7 @@
     bloomSize: [0.4, 2.2, 1],
     bloomSpread: [0, 1.6, 0.55],
     bloomSpin: [0, 2.5, 1],
+    bloomSwirl: [0, 5, 1.5],
     bloomShape: [0, 1, 0.28],
     bloomHue: [0, 1, 0.72],
     bloomWarm: [0, 1, 0.42],
@@ -819,12 +857,12 @@
     if (!artDisc) return;
     artDisc.classList.add("is-hidden");
     if (!root) return;
-    root.classList.remove(
-      "scviz-mode-pulse",
-      "scviz-mode-ridge",
-      "scviz-mode-bloom",
-      "scviz-mode-magnetosphere"
-    );
+    // Derived from the mode list rather than hand-written: the hand-written
+    // version was missing "dance", so switching away from it left the class on
+    // and the tray kept showing that mode's knobs.
+    for (const cls of [...root.classList]) {
+      if (cls.startsWith("scviz-mode-")) root.classList.remove(cls);
+    }
     root.classList.add(`scviz-mode-${state.mode}`);
   }
 
@@ -1348,33 +1386,27 @@
     const ctx = new AudioContext();
     if (ctx.state === "suspended") await ctx.resume();
     const source = ctx.createMediaStreamSource(stream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 4096;
-    analyser.smoothingTimeConstant = 0.38;
-    analyser.minDecibels = -90;
-    analyser.maxDecibels = -22;
-    source.connect(analyser);
+    // tabCapture mutes the tab, so this path owns playback. That also means it
+    // owns the output chain -- which is where the P4 lookahead delay goes.
     source.connect(ctx.destination);
-    const freq = new Uint8Array(analyser.frequencyBinCount);
-    const time = new Uint8Array(analyser.fftSize);
-    const outF = new Uint8Array(256);
-    const outT = new Uint8Array(512);
 
-    const tick = () => {
-      if (!state.capture || !alive()) return;
-      try {
-        analyser.getByteFrequencyData(freq);
-        analyser.getByteTimeDomainData(time);
-        logBucket(freq, outF, analyser);
-        pick(time, outT);
-        state.viz.setAudio(outF, outT);
-        state.capture.raf = requestAnimationFrame(tick);
-      } catch (err) {
-        if (isInvalidated(err)) shutdown();
-      }
-    };
-
-    state.capture = { stream, ctx, raf: requestAnimationFrame(tick) };
+    const engine = new window.ScvizAudio.AudioEngine(ctx, source, {
+      workletUrl: chrome.runtime.getURL("src/audio-worklet.js"),
+      onFrame: (frame) => {
+        if (!state.capture || !alive()) return;
+        state.viz.setFrame(frame);
+        state.hud?.push(frame);
+      },
+      onStatus: (status) => state.hud?.setStatus(status),
+    });
+    state.capture = { stream, ctx, engine };
+    if (state.hud) state.hud.ctxAudio = ctx;
+    await engine.start();
+    state.hud?.setStatus(engine.status());
+    // Status counters move slowly; poll them rather than pay per hop.
+    state.capture.statusTimer = window.setInterval(() => {
+      state.hud?.setStatus(engine.status());
+    }, 700);
   }
 
   function teardownCapture() {
@@ -1382,46 +1414,13 @@
     const cap = state.capture;
     state.capture = null;
     if (!cap) return;
-    cancelAnimationFrame(cap.raf);
+    if (cap.statusTimer) clearInterval(cap.statusTimer);
+    cap.engine?.stop();
     cap.stream?.getTracks().forEach((track) => track.stop());
     cap.ctx?.close().catch(() => {});
   }
 
-  function pick(src, dest) {
-    const step = src.length / dest.length;
-    for (let i = 0; i < dest.length; i++) dest[i] = src[(i * step) | 0];
-  }
 
-  function logBucket(src, dest, analyser) {
-    const n = dest.length;
-    const N = src.length;
-    const sr = analyser?.context?.sampleRate || 44100;
-    const fftSize = analyser?.fftSize || N * 2;
-    const binHz = sr / fftSize;
-    const minIdx = Math.max(1, Math.round(38 / binHz));
-    const maxIdx = Math.min(N - 1, Math.round(15500 / binHz));
-    const span = Math.max(2, maxIdx / minIdx);
-    for (let i = 0; i < n; i++) {
-      const lo = Math.max(
-        minIdx,
-        Math.floor(minIdx * Math.pow(span, i / n))
-      );
-      const hi = Math.max(
-        lo + 1,
-        Math.floor(minIdx * Math.pow(span, (i + 1) / n))
-      );
-      let peak = 0;
-      let sum = 0;
-      let count = 0;
-      for (let j = lo; j < hi && j < N; j++) {
-        const v = src[j];
-        sum += v;
-        count++;
-        if (v > peak) peak = v;
-      }
-      dest[i] = count ? 0.4 * (sum / count) + 0.6 * peak : 0;
-    }
-  }
 
   function waitForClientId() {
     return new Promise((resolve) => {
